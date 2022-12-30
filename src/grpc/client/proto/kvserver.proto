@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+option go_package = ".;kvserver";
+
+service KVServer {
+    rpc OpenSession (OpenSessionArgs) returns (OpenSessionReply);
+    rpc Get (GetArgs) returns (GetReply);
+    rpc Update (UpdateArgs) returns (UpdateReply);
+}
+
+
+message OpenSessionArgs {
+
+}
+
+message OpenSessionReply {
+    int64 ClientId = 1;
+    string Err = 2;
+}
+
+message UpdateArgs {
+    string Key = 1;
+    string Value = 2;
+    string Op = 3;          // "Put" or "Append" or "Delete"
+    int64 ClientId = 4;     // client id
+    int64 RequestId = 5;    // client request id (increase monotonically)
+}
+
+message UpdateReply {
+    string Err = 1;
+}
+
+message GetArgs {
+    string Key = 1;
+    int64 ClientId = 2;   // client id
+    int64 RequestId = 3; // client request id (increase monotonically)
+}
+
+message GetReply {
+    string Err = 1;
+    string Value = 2;
+}
+
