@@ -2,7 +2,9 @@ package storage
 
 import (
 	"bufio"
+	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"runtime"
@@ -12,7 +14,8 @@ import (
 
 //
 // Storage is to support for Raft and kvdb to save persistent data
-// To ensure that the stored raft state and snapshot are consistent, store the raft state in a file ending in .rf,
+// To ensure that the stored raft state and snapshot are consistent, Storage uses os.Rename to rename files atomically
+// Storage store the raft state in a file ending in .rf,
 // the snapshot and its corresponding raft state is stored in the file at the end of .rfs.
 // If an error occurs while reading the raft state or snapshot, the program will be terminated and an error message will be reported.
 // After calling the ReadRaftState or ReadSnapshot method, if the data exists, it will be cached;
@@ -140,8 +143,8 @@ func (ps *Storage) readRFAndRFS() ([]byte, int64, []byte) {
 	var snapshot []byte
 	var version1 int64 = -1
 	var version2 int64 = -1
-	file, err := os.Open(ps.raftStatePath)
-	if err == nil {
+	file := safeOpen(ps.raftStatePath)
+	if file != nil {
 		reader := bufio.NewReader(file)
 		readFileHeader(reader)
 		raftState1, version1, _ = ps.readRaftState(reader)
@@ -157,17 +160,16 @@ func (ps *Storage) readRFAndRFS() ([]byte, int64, []byte) {
 }
 
 func (ps *Storage) readRFS() ([]byte, int64, []byte) {
-	file, err := os.Open(ps.snapshotPath)
 	var raftState []byte
 	var version int64 = -1
 	var snapshot []byte
-	if err == nil {
+	file := safeOpen(ps.snapshotPath)
+	if file != nil {
 		reader := bufio.NewReader(file)
 		readLen1 := int64(readFileHeader(reader))
 		var readLen2 int64
 		raftState, version, readLen2 = ps.readRaftState(reader)
-		var stat os.FileInfo
-		stat, err = file.Stat()
+		stat, err := file.Stat()
 		if err != nil {
 			log.Fatalln("error getting file information, errorInfo:", err)
 		}
@@ -175,6 +177,17 @@ func (ps *Storage) readRFS() ([]byte, int64, []byte) {
 		file.Close()
 	}
 	return raftState, version, snapshot
+}
+
+func safeOpen(name string) fs.File {
+	file, err := os.Open(name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		log.Fatalln("cannot open file:[", file, "], please check you have permission to access this file! errorInfo: ", err)
+	}
+	return file
 }
 
 func readFileHeader(reader *bufio.Reader) int {
