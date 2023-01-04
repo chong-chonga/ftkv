@@ -69,6 +69,7 @@ func (ps *Storage) SaveRaftState(state []byte) {
 	}
 	ps.writeRaftState(writer, state)
 	writer.Flush()
+	tmpFile.Sync()
 	tmpFile.Close()
 	err = os.Rename(tmpFile.Name(), ps.raftStatePath)
 	if err != nil {
@@ -98,8 +99,8 @@ func (ps *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) {
 		writer.Write(ps.snapshot)
 	}
 	writer.Flush()
+	tmpFile.Sync()
 	tmpFile.Close()
-	//temp.Sync()
 	err = os.Rename(tmpFile.Name(), ps.snapshotPath)
 	if err != nil {
 		os.Remove(tmpFile.Name())
