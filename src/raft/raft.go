@@ -34,10 +34,10 @@ import (
 
 // 为了方便使用日志进行debug或者进行测试, 使用常量开关来控制日志的打印
 const (
-	Log2AEnabled = true
-	Log2BEnabled = true
-	Log2CEnabled = true
-	Log2DEnabled = true
+	Log2AEnabled = false
+	Log2BEnabled = false
+	Log2CEnabled = false
+	Log2DEnabled = false
 )
 
 const (
@@ -171,11 +171,11 @@ func (rf *Raft) persist() {
 //
 // restore previously persisted state.
 //
-func (rf *Raft) readRaftState(data []byte) {
-	if data == nil || len(data) < 1 {
+func (rf *Raft) recoverFrom(raftState []byte) {
+	if raftState == nil || len(raftState) < 1 {
 		return
 	}
-	buf := bytes.NewBuffer(data)
+	buf := bytes.NewBuffer(raftState)
 	d := safegob.NewDecoder(buf)
 
 	var currentTerm int
@@ -970,7 +970,7 @@ func Make(serverAddresses []string, me int, storage *storage.Storage, applyCh ch
 	rf.lastAppliedTerm = 0
 
 	// initialize from state persisted before a crash
-	rf.readRaftState(storage.ReadRaftState())
+	rf.recoverFrom(storage.ReadRaftState())
 	rf.snapshot = storage.ReadSnapshot()
 
 	// start ticker goroutine to start elections
