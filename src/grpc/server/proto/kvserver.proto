@@ -3,85 +3,58 @@ syntax = "proto3";
 option go_package = ".;kvserver";
 
 service KVServer {
-    rpc OpenSession (OpenSessionArgs) returns (OpenSessionReply);
-    rpc Get (GetArgs) returns (GetReply);
-    rpc Update (UpdateArgs) returns (UpdateReply);
+    rpc ClearSession (ClearSessionRequest) returns (ClearSessionReply);
+    rpc OpenSession (OpenSessionRequest) returns (OpenSessionReply);
+    rpc Get (GetRequest) returns (GetReply);
+    rpc Update (UpdateRequest) returns (UpdateReply);
 }
 
-message OpenSessionArgs {
+enum ErrCode {
+    WRONG_LEADER = 0;
+    OK = 1;
+    NO_KEY = 2;
+    TIMEOUT = 3;
+    INVALID_SESSION = 4;
+    INVALID_TOKEN = 5;
+}
+
+message ClearSessionRequest {
+    string token = 1;
+}
+
+message ClearSessionReply {
+    ErrCode err_code = 1;
+}
+
+message OpenSessionRequest {
 
 }
 
 message OpenSessionReply {
-    int64 ClientId = 1;
-    string Err = 2;
+    int64 client_id = 1;
+    string err_code = 2;
 }
 
-message UpdateArgs {
-    string Key = 1;
-    string Value = 2;
-    string Op = 3;          // "Put" or "Append" or "Delete"
-    int64 ClientId = 4;     // client id
-    int64 RequestId = 5;    // client request id (increase monotonically)
+message UpdateRequest {
+    string key = 1;
+    string value = 2;
+    string op = 3;           // "Put" or "Append" or "Delete"
+    int64 client_id = 4;     // client id
+    int64 request_id = 5;    // client request id (increase monotonically)
 }
 
 message UpdateReply {
-    string Err = 1;
+    ErrCode err_code = 1;
 }
 
-message GetArgs {
-    string Key = 1;
-    int64 ClientId = 2;   // client id
-    int64 RequestId = 3; // client request id (increase monotonically)
+message GetRequest {
+    string key = 1;
+    int64 client_id = 2;   // client id
+    int64 request_id = 3;  // client request id (increase monotonically)
 }
 
 message GetReply {
-    string Err = 1;
-    string Value = 2;
+    ErrCode err_code = 1;
+    string value = 2;
 }
-
-//service Raft {
-//    rpc RequestVote(RequestVoteArgs) returns (RequestVoteReply);
-//
-//    rpc AppendEntries(AppendEntriesArgs) returns (AppendEntriesReply);
-//
-//    rpc InstallSnapshot(InstallSnapshotArgs) returns (InstallSnapshotReply);
-//}
-//
-//message RequestVoteArgs {
-//    int32 Term = 1;
-//    int32 CandidateId = 2;
-//    int32 LastLogIndex = 3;
-//    int32 LastLogTerm = 4;
-//}
-//
-//message RequestVoteReply {
-//    repeated bytes command = 1;
-//}
-//
-//message AppendEntriesArgs {
-//    int32 Term = 1;
-//    int32 LeaderId = 2;
-//    int32 PrevLogIndex = 3;
-//    int32 PrevLogTerm = 4;
-//    int32 LeaderCommit = 5;
-//    repeated LogEntry Entries = 6;
-//}
-//
-//message LogEntry {
-//    int32 Term = 1;
-//
-//}
-//
-//message AppendEntriesReply {
-//
-//}
-//
-//message InstallSnapshotArgs {
-//
-//}
-//
-//message InstallSnapshotReply {
-//
-//}
 

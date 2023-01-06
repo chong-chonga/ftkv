@@ -22,9 +22,10 @@ const _ = grpc.SupportPackageIsVersion7
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type KVServerClient interface {
-	OpenSession(ctx context.Context, in *OpenSessionArgs, opts ...grpc.CallOption) (*OpenSessionReply, error)
-	Get(ctx context.Context, in *GetArgs, opts ...grpc.CallOption) (*GetReply, error)
-	Update(ctx context.Context, in *UpdateArgs, opts ...grpc.CallOption) (*UpdateReply, error)
+	ClearSession(ctx context.Context, in *ClearSessionRequest, opts ...grpc.CallOption) (*ClearSessionReply, error)
+	OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionReply, error)
+	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetReply, error)
+	Update(ctx context.Context, in *UpdateRequest, opts ...grpc.CallOption) (*UpdateReply, error)
 }
 
 type kVServerClient struct {
@@ -35,7 +36,16 @@ func NewKVServerClient(cc grpc.ClientConnInterface) KVServerClient {
 	return &kVServerClient{cc}
 }
 
-func (c *kVServerClient) OpenSession(ctx context.Context, in *OpenSessionArgs, opts ...grpc.CallOption) (*OpenSessionReply, error) {
+func (c *kVServerClient) ClearSession(ctx context.Context, in *ClearSessionRequest, opts ...grpc.CallOption) (*ClearSessionReply, error) {
+	out := new(ClearSessionReply)
+	err := c.cc.Invoke(ctx, "/KVServer/ClearSession", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kVServerClient) OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionReply, error) {
 	out := new(OpenSessionReply)
 	err := c.cc.Invoke(ctx, "/KVServer/OpenSession", in, out, opts...)
 	if err != nil {
@@ -44,7 +54,7 @@ func (c *kVServerClient) OpenSession(ctx context.Context, in *OpenSessionArgs, o
 	return out, nil
 }
 
-func (c *kVServerClient) Get(ctx context.Context, in *GetArgs, opts ...grpc.CallOption) (*GetReply, error) {
+func (c *kVServerClient) Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetReply, error) {
 	out := new(GetReply)
 	err := c.cc.Invoke(ctx, "/KVServer/Get", in, out, opts...)
 	if err != nil {
@@ -53,7 +63,7 @@ func (c *kVServerClient) Get(ctx context.Context, in *GetArgs, opts ...grpc.Call
 	return out, nil
 }
 
-func (c *kVServerClient) Update(ctx context.Context, in *UpdateArgs, opts ...grpc.CallOption) (*UpdateReply, error) {
+func (c *kVServerClient) Update(ctx context.Context, in *UpdateRequest, opts ...grpc.CallOption) (*UpdateReply, error) {
 	out := new(UpdateReply)
 	err := c.cc.Invoke(ctx, "/KVServer/Update", in, out, opts...)
 	if err != nil {
@@ -66,9 +76,10 @@ func (c *kVServerClient) Update(ctx context.Context, in *UpdateArgs, opts ...grp
 // All implementations must embed UnimplementedKVServerServer
 // for forward compatibility
 type KVServerServer interface {
-	OpenSession(context.Context, *OpenSessionArgs) (*OpenSessionReply, error)
-	Get(context.Context, *GetArgs) (*GetReply, error)
-	Update(context.Context, *UpdateArgs) (*UpdateReply, error)
+	ClearSession(context.Context, *ClearSessionRequest) (*ClearSessionReply, error)
+	OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionReply, error)
+	Get(context.Context, *GetRequest) (*GetReply, error)
+	Update(context.Context, *UpdateRequest) (*UpdateReply, error)
 	mustEmbedUnimplementedKVServerServer()
 }
 
@@ -76,13 +87,16 @@ type KVServerServer interface {
 type UnimplementedKVServerServer struct {
 }
 
-func (UnimplementedKVServerServer) OpenSession(context.Context, *OpenSessionArgs) (*OpenSessionReply, error) {
+func (UnimplementedKVServerServer) ClearSession(context.Context, *ClearSessionRequest) (*ClearSessionReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClearSession not implemented")
+}
+func (UnimplementedKVServerServer) OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method OpenSession not implemented")
 }
-func (UnimplementedKVServerServer) Get(context.Context, *GetArgs) (*GetReply, error) {
+func (UnimplementedKVServerServer) Get(context.Context, *GetRequest) (*GetReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Get not implemented")
 }
-func (UnimplementedKVServerServer) Update(context.Context, *UpdateArgs) (*UpdateReply, error) {
+func (UnimplementedKVServerServer) Update(context.Context, *UpdateRequest) (*UpdateReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Update not implemented")
 }
 func (UnimplementedKVServerServer) mustEmbedUnimplementedKVServerServer() {}
@@ -98,8 +112,26 @@ func RegisterKVServerServer(s grpc.ServiceRegistrar, srv KVServerServer) {
 	s.RegisterService(&KVServer_ServiceDesc, srv)
 }
 
+func _KVServer_ClearSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClearSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KVServerServer).ClearSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/KVServer/ClearSession",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KVServerServer).ClearSession(ctx, req.(*ClearSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _KVServer_OpenSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(OpenSessionArgs)
+	in := new(OpenSessionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -111,13 +143,13 @@ func _KVServer_OpenSession_Handler(srv interface{}, ctx context.Context, dec fun
 		FullMethod: "/KVServer/OpenSession",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(KVServerServer).OpenSession(ctx, req.(*OpenSessionArgs))
+		return srv.(KVServerServer).OpenSession(ctx, req.(*OpenSessionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _KVServer_Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetArgs)
+	in := new(GetRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -129,13 +161,13 @@ func _KVServer_Get_Handler(srv interface{}, ctx context.Context, dec func(interf
 		FullMethod: "/KVServer/Get",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(KVServerServer).Get(ctx, req.(*GetArgs))
+		return srv.(KVServerServer).Get(ctx, req.(*GetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _KVServer_Update_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UpdateArgs)
+	in := new(UpdateRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -147,7 +179,7 @@ func _KVServer_Update_Handler(srv interface{}, ctx context.Context, dec func(int
 		FullMethod: "/KVServer/Update",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(KVServerServer).Update(ctx, req.(*UpdateArgs))
+		return srv.(KVServerServer).Update(ctx, req.(*UpdateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -159,6 +191,10 @@ var KVServer_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "KVServer",
 	HandlerType: (*KVServerServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ClearSession",
+			Handler:    _KVServer_ClearSession_Handler,
+		},
 		{
 			MethodName: "OpenSession",
 			Handler:    _KVServer_OpenSession_Handler,

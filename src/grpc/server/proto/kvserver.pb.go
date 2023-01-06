@@ -20,14 +20,74 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-type OpenSessionArgs struct {
+type ErrCode int32
+
+const (
+	ErrCode_WRONG_LEADER    ErrCode = 0
+	ErrCode_OK              ErrCode = 1
+	ErrCode_NO_KEY          ErrCode = 2
+	ErrCode_TIMEOUT         ErrCode = 3
+	ErrCode_INVALID_SESSION ErrCode = 4
+	ErrCode_INVALID_TOKEN   ErrCode = 5
+)
+
+// Enum value maps for ErrCode.
+var (
+	ErrCode_name = map[int32]string{
+		0: "WRONG_LEADER",
+		1: "OK",
+		2: "NO_KEY",
+		3: "TIMEOUT",
+		4: "INVALID_SESSION",
+		5: "INVALID_TOKEN",
+	}
+	ErrCode_value = map[string]int32{
+		"WRONG_LEADER":    0,
+		"OK":              1,
+		"NO_KEY":          2,
+		"TIMEOUT":         3,
+		"INVALID_SESSION": 4,
+		"INVALID_TOKEN":   5,
+	}
+)
+
+func (x ErrCode) Enum() *ErrCode {
+	p := new(ErrCode)
+	*p = x
+	return p
+}
+
+func (x ErrCode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ErrCode) Descriptor() protoreflect.EnumDescriptor {
+	return file_kvserver_proto_enumTypes[0].Descriptor()
+}
+
+func (ErrCode) Type() protoreflect.EnumType {
+	return &file_kvserver_proto_enumTypes[0]
+}
+
+func (x ErrCode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ErrCode.Descriptor instead.
+func (ErrCode) EnumDescriptor() ([]byte, []int) {
+	return file_kvserver_proto_rawDescGZIP(), []int{0}
+}
+
+type ClearSessionRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
+
+	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
 }
 
-func (x *OpenSessionArgs) Reset() {
-	*x = OpenSessionArgs{}
+func (x *ClearSessionRequest) Reset() {
+	*x = ClearSessionRequest{}
 	if protoimpl.UnsafeEnabled {
 		mi := &file_kvserver_proto_msgTypes[0]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -35,13 +95,13 @@ func (x *OpenSessionArgs) Reset() {
 	}
 }
 
-func (x *OpenSessionArgs) String() string {
+func (x *ClearSessionRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*OpenSessionArgs) ProtoMessage() {}
+func (*ClearSessionRequest) ProtoMessage() {}
 
-func (x *OpenSessionArgs) ProtoReflect() protoreflect.Message {
+func (x *ClearSessionRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_kvserver_proto_msgTypes[0]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -53,9 +113,101 @@ func (x *OpenSessionArgs) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use OpenSessionArgs.ProtoReflect.Descriptor instead.
-func (*OpenSessionArgs) Descriptor() ([]byte, []int) {
+// Deprecated: Use ClearSessionRequest.ProtoReflect.Descriptor instead.
+func (*ClearSessionRequest) Descriptor() ([]byte, []int) {
 	return file_kvserver_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ClearSessionRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+type ClearSessionReply struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	ErrCode ErrCode `protobuf:"varint,1,opt,name=err_code,json=errCode,proto3,enum=ErrCode" json:"err_code,omitempty"`
+}
+
+func (x *ClearSessionReply) Reset() {
+	*x = ClearSessionReply{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_kvserver_proto_msgTypes[1]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ClearSessionReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClearSessionReply) ProtoMessage() {}
+
+func (x *ClearSessionReply) ProtoReflect() protoreflect.Message {
+	mi := &file_kvserver_proto_msgTypes[1]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClearSessionReply.ProtoReflect.Descriptor instead.
+func (*ClearSessionReply) Descriptor() ([]byte, []int) {
+	return file_kvserver_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ClearSessionReply) GetErrCode() ErrCode {
+	if x != nil {
+		return x.ErrCode
+	}
+	return ErrCode_WRONG_LEADER
+}
+
+type OpenSessionRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+}
+
+func (x *OpenSessionRequest) Reset() {
+	*x = OpenSessionRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_kvserver_proto_msgTypes[2]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *OpenSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OpenSessionRequest) ProtoMessage() {}
+
+func (x *OpenSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kvserver_proto_msgTypes[2]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OpenSessionRequest.ProtoReflect.Descriptor instead.
+func (*OpenSessionRequest) Descriptor() ([]byte, []int) {
+	return file_kvserver_proto_rawDescGZIP(), []int{2}
 }
 
 type OpenSessionReply struct {
@@ -63,14 +215,14 @@ type OpenSessionReply struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	ClientId int64  `protobuf:"varint,1,opt,name=ClientId,proto3" json:"ClientId,omitempty"`
-	Err      string `protobuf:"bytes,2,opt,name=Err,proto3" json:"Err,omitempty"`
+	ClientId int64  `protobuf:"varint,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	ErrCode  string `protobuf:"bytes,2,opt,name=err_code,json=errCode,proto3" json:"err_code,omitempty"`
 }
 
 func (x *OpenSessionReply) Reset() {
 	*x = OpenSessionReply{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_kvserver_proto_msgTypes[1]
+		mi := &file_kvserver_proto_msgTypes[3]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -83,7 +235,7 @@ func (x *OpenSessionReply) String() string {
 func (*OpenSessionReply) ProtoMessage() {}
 
 func (x *OpenSessionReply) ProtoReflect() protoreflect.Message {
-	mi := &file_kvserver_proto_msgTypes[1]
+	mi := &file_kvserver_proto_msgTypes[3]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -96,7 +248,7 @@ func (x *OpenSessionReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenSessionReply.ProtoReflect.Descriptor instead.
 func (*OpenSessionReply) Descriptor() ([]byte, []int) {
-	return file_kvserver_proto_rawDescGZIP(), []int{1}
+	return file_kvserver_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *OpenSessionReply) GetClientId() int64 {
@@ -106,42 +258,42 @@ func (x *OpenSessionReply) GetClientId() int64 {
 	return 0
 }
 
-func (x *OpenSessionReply) GetErr() string {
+func (x *OpenSessionReply) GetErrCode() string {
 	if x != nil {
-		return x.Err
+		return x.ErrCode
 	}
 	return ""
 }
 
-type UpdateArgs struct {
+type UpdateRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Key       string `protobuf:"bytes,1,opt,name=Key,proto3" json:"Key,omitempty"`
-	Value     string `protobuf:"bytes,2,opt,name=Value,proto3" json:"Value,omitempty"`
-	Op        string `protobuf:"bytes,3,opt,name=Op,proto3" json:"Op,omitempty"`                // "Put" or "Append" or "Delete"
-	ClientId  int64  `protobuf:"varint,4,opt,name=ClientId,proto3" json:"ClientId,omitempty"`   // client id
-	RequestId int64  `protobuf:"varint,5,opt,name=RequestId,proto3" json:"RequestId,omitempty"` // client request id (increase monotonically)
+	Key       string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Value     string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	Op        string `protobuf:"bytes,3,opt,name=op,proto3" json:"op,omitempty"`                                 // "Put" or "Append" or "Delete"
+	ClientId  int64  `protobuf:"varint,4,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`    // client id
+	RequestId int64  `protobuf:"varint,5,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // client request id (increase monotonically)
 }
 
-func (x *UpdateArgs) Reset() {
-	*x = UpdateArgs{}
+func (x *UpdateRequest) Reset() {
+	*x = UpdateRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_kvserver_proto_msgTypes[2]
+		mi := &file_kvserver_proto_msgTypes[4]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *UpdateArgs) String() string {
+func (x *UpdateRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*UpdateArgs) ProtoMessage() {}
+func (*UpdateRequest) ProtoMessage() {}
 
-func (x *UpdateArgs) ProtoReflect() protoreflect.Message {
-	mi := &file_kvserver_proto_msgTypes[2]
+func (x *UpdateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kvserver_proto_msgTypes[4]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -152,40 +304,40 @@ func (x *UpdateArgs) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use UpdateArgs.ProtoReflect.Descriptor instead.
-func (*UpdateArgs) Descriptor() ([]byte, []int) {
-	return file_kvserver_proto_rawDescGZIP(), []int{2}
+// Deprecated: Use UpdateRequest.ProtoReflect.Descriptor instead.
+func (*UpdateRequest) Descriptor() ([]byte, []int) {
+	return file_kvserver_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *UpdateArgs) GetKey() string {
+func (x *UpdateRequest) GetKey() string {
 	if x != nil {
 		return x.Key
 	}
 	return ""
 }
 
-func (x *UpdateArgs) GetValue() string {
+func (x *UpdateRequest) GetValue() string {
 	if x != nil {
 		return x.Value
 	}
 	return ""
 }
 
-func (x *UpdateArgs) GetOp() string {
+func (x *UpdateRequest) GetOp() string {
 	if x != nil {
 		return x.Op
 	}
 	return ""
 }
 
-func (x *UpdateArgs) GetClientId() int64 {
+func (x *UpdateRequest) GetClientId() int64 {
 	if x != nil {
 		return x.ClientId
 	}
 	return 0
 }
 
-func (x *UpdateArgs) GetRequestId() int64 {
+func (x *UpdateRequest) GetRequestId() int64 {
 	if x != nil {
 		return x.RequestId
 	}
@@ -197,13 +349,13 @@ type UpdateReply struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Err string `protobuf:"bytes,1,opt,name=Err,proto3" json:"Err,omitempty"`
+	ErrCode ErrCode `protobuf:"varint,1,opt,name=err_code,json=errCode,proto3,enum=ErrCode" json:"err_code,omitempty"`
 }
 
 func (x *UpdateReply) Reset() {
 	*x = UpdateReply{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_kvserver_proto_msgTypes[3]
+		mi := &file_kvserver_proto_msgTypes[5]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -216,7 +368,7 @@ func (x *UpdateReply) String() string {
 func (*UpdateReply) ProtoMessage() {}
 
 func (x *UpdateReply) ProtoReflect() protoreflect.Message {
-	mi := &file_kvserver_proto_msgTypes[3]
+	mi := &file_kvserver_proto_msgTypes[5]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -229,43 +381,43 @@ func (x *UpdateReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateReply.ProtoReflect.Descriptor instead.
 func (*UpdateReply) Descriptor() ([]byte, []int) {
-	return file_kvserver_proto_rawDescGZIP(), []int{3}
+	return file_kvserver_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *UpdateReply) GetErr() string {
+func (x *UpdateReply) GetErrCode() ErrCode {
 	if x != nil {
-		return x.Err
+		return x.ErrCode
 	}
-	return ""
+	return ErrCode_WRONG_LEADER
 }
 
-type GetArgs struct {
+type GetRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Key       string `protobuf:"bytes,1,opt,name=Key,proto3" json:"Key,omitempty"`
-	ClientId  int64  `protobuf:"varint,2,opt,name=ClientId,proto3" json:"ClientId,omitempty"`   // client id
-	RequestId int64  `protobuf:"varint,3,opt,name=RequestId,proto3" json:"RequestId,omitempty"` // client request id (increase monotonically)
+	Key       string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	ClientId  int64  `protobuf:"varint,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`    // client id
+	RequestId int64  `protobuf:"varint,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // client request id (increase monotonically)
 }
 
-func (x *GetArgs) Reset() {
-	*x = GetArgs{}
+func (x *GetRequest) Reset() {
+	*x = GetRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_kvserver_proto_msgTypes[4]
+		mi := &file_kvserver_proto_msgTypes[6]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *GetArgs) String() string {
+func (x *GetRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GetArgs) ProtoMessage() {}
+func (*GetRequest) ProtoMessage() {}
 
-func (x *GetArgs) ProtoReflect() protoreflect.Message {
-	mi := &file_kvserver_proto_msgTypes[4]
+func (x *GetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kvserver_proto_msgTypes[6]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -276,26 +428,26 @@ func (x *GetArgs) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GetArgs.ProtoReflect.Descriptor instead.
-func (*GetArgs) Descriptor() ([]byte, []int) {
-	return file_kvserver_proto_rawDescGZIP(), []int{4}
+// Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
+func (*GetRequest) Descriptor() ([]byte, []int) {
+	return file_kvserver_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *GetArgs) GetKey() string {
+func (x *GetRequest) GetKey() string {
 	if x != nil {
 		return x.Key
 	}
 	return ""
 }
 
-func (x *GetArgs) GetClientId() int64 {
+func (x *GetRequest) GetClientId() int64 {
 	if x != nil {
 		return x.ClientId
 	}
 	return 0
 }
 
-func (x *GetArgs) GetRequestId() int64 {
+func (x *GetRequest) GetRequestId() int64 {
 	if x != nil {
 		return x.RequestId
 	}
@@ -307,14 +459,14 @@ type GetReply struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Err   string `protobuf:"bytes,1,opt,name=Err,proto3" json:"Err,omitempty"`
-	Value string `protobuf:"bytes,2,opt,name=Value,proto3" json:"Value,omitempty"`
+	ErrCode ErrCode `protobuf:"varint,1,opt,name=err_code,json=errCode,proto3,enum=ErrCode" json:"err_code,omitempty"`
+	Value   string  `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
 }
 
 func (x *GetReply) Reset() {
 	*x = GetReply{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_kvserver_proto_msgTypes[5]
+		mi := &file_kvserver_proto_msgTypes[7]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -327,7 +479,7 @@ func (x *GetReply) String() string {
 func (*GetReply) ProtoMessage() {}
 
 func (x *GetReply) ProtoReflect() protoreflect.Message {
-	mi := &file_kvserver_proto_msgTypes[5]
+	mi := &file_kvserver_proto_msgTypes[7]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -340,14 +492,14 @@ func (x *GetReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetReply.ProtoReflect.Descriptor instead.
 func (*GetReply) Descriptor() ([]byte, []int) {
-	return file_kvserver_proto_rawDescGZIP(), []int{5}
+	return file_kvserver_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *GetReply) GetErr() string {
+func (x *GetReply) GetErrCode() ErrCode {
 	if x != nil {
-		return x.Err
+		return x.ErrCode
 	}
-	return ""
+	return ErrCode_WRONG_LEADER
 }
 
 func (x *GetReply) GetValue() string {
@@ -361,40 +513,61 @@ var File_kvserver_proto protoreflect.FileDescriptor
 
 var file_kvserver_proto_rawDesc = []byte{
 	0x0a, 0x0e, 0x6b, 0x76, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f,
-	0x22, 0x11, 0x0a, 0x0f, 0x4f, 0x70, 0x65, 0x6e, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x41,
-	0x72, 0x67, 0x73, 0x22, 0x40, 0x0a, 0x10, 0x4f, 0x70, 0x65, 0x6e, 0x53, 0x65, 0x73, 0x73, 0x69,
-	0x6f, 0x6e, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x1a, 0x0a, 0x08, 0x43, 0x6c, 0x69, 0x65, 0x6e,
-	0x74, 0x49, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x03, 0x52, 0x08, 0x43, 0x6c, 0x69, 0x65, 0x6e,
-	0x74, 0x49, 0x64, 0x12, 0x10, 0x0a, 0x03, 0x45, 0x72, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x03, 0x45, 0x72, 0x72, 0x22, 0x7e, 0x0a, 0x0a, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x41,
-	0x72, 0x67, 0x73, 0x12, 0x10, 0x0a, 0x03, 0x4b, 0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x03, 0x4b, 0x65, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x56, 0x61, 0x6c, 0x75, 0x65, 0x18, 0x02,
-	0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x56, 0x61, 0x6c, 0x75, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x4f,
-	0x70, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x4f, 0x70, 0x12, 0x1a, 0x0a, 0x08, 0x43,
-	0x6c, 0x69, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x18, 0x04, 0x20, 0x01, 0x28, 0x03, 0x52, 0x08, 0x43,
-	0x6c, 0x69, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x1c, 0x0a, 0x09, 0x52, 0x65, 0x71, 0x75, 0x65,
-	0x73, 0x74, 0x49, 0x64, 0x18, 0x05, 0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x52, 0x65, 0x71, 0x75,
-	0x65, 0x73, 0x74, 0x49, 0x64, 0x22, 0x1f, 0x0a, 0x0b, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x52,
-	0x65, 0x70, 0x6c, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x45, 0x72, 0x72, 0x18, 0x01, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x03, 0x45, 0x72, 0x72, 0x22, 0x55, 0x0a, 0x07, 0x47, 0x65, 0x74, 0x41, 0x72, 0x67,
-	0x73, 0x12, 0x10, 0x0a, 0x03, 0x4b, 0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03,
-	0x4b, 0x65, 0x79, 0x12, 0x1a, 0x0a, 0x08, 0x43, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x18,
-	0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x08, 0x43, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x12,
-	0x1c, 0x0a, 0x09, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x49, 0x64, 0x18, 0x03, 0x20, 0x01,
-	0x28, 0x03, 0x52, 0x09, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x49, 0x64, 0x22, 0x32, 0x0a,
-	0x08, 0x47, 0x65, 0x74, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x45, 0x72, 0x72,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x45, 0x72, 0x72, 0x12, 0x14, 0x0a, 0x05, 0x56,
-	0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x56, 0x61, 0x6c, 0x75,
-	0x65, 0x32, 0x7f, 0x0a, 0x08, 0x4b, 0x56, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72, 0x12, 0x32, 0x0a,
-	0x0b, 0x4f, 0x70, 0x65, 0x6e, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x10, 0x2e, 0x4f,
-	0x70, 0x65, 0x6e, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x41, 0x72, 0x67, 0x73, 0x1a, 0x11,
-	0x2e, 0x4f, 0x70, 0x65, 0x6e, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x70, 0x6c,
-	0x79, 0x12, 0x1a, 0x0a, 0x03, 0x47, 0x65, 0x74, 0x12, 0x08, 0x2e, 0x47, 0x65, 0x74, 0x41, 0x72,
-	0x67, 0x73, 0x1a, 0x09, 0x2e, 0x47, 0x65, 0x74, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x23, 0x0a,
-	0x06, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x12, 0x0b, 0x2e, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65,
-	0x41, 0x72, 0x67, 0x73, 0x1a, 0x0c, 0x2e, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x52, 0x65, 0x70,
-	0x6c, 0x79, 0x42, 0x0c, 0x5a, 0x0a, 0x2e, 0x3b, 0x6b, 0x76, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72,
-	0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x22, 0x2b, 0x0a, 0x13, 0x43, 0x6c, 0x65, 0x61, 0x72, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e,
+	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x14, 0x0a, 0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e,
+	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x22, 0x38, 0x0a,
+	0x11, 0x43, 0x6c, 0x65, 0x61, 0x72, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x70,
+	0x6c, 0x79, 0x12, 0x23, 0x0a, 0x08, 0x65, 0x72, 0x72, 0x5f, 0x63, 0x6f, 0x64, 0x65, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x0e, 0x32, 0x08, 0x2e, 0x45, 0x72, 0x72, 0x43, 0x6f, 0x64, 0x65, 0x52, 0x07,
+	0x65, 0x72, 0x72, 0x43, 0x6f, 0x64, 0x65, 0x22, 0x14, 0x0a, 0x12, 0x4f, 0x70, 0x65, 0x6e, 0x53,
+	0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x22, 0x4a, 0x0a,
+	0x10, 0x4f, 0x70, 0x65, 0x6e, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x70, 0x6c,
+	0x79, 0x12, 0x1b, 0x0a, 0x09, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x03, 0x52, 0x08, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x19,
+	0x0a, 0x08, 0x65, 0x72, 0x72, 0x5f, 0x63, 0x6f, 0x64, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x07, 0x65, 0x72, 0x72, 0x43, 0x6f, 0x64, 0x65, 0x22, 0x83, 0x01, 0x0a, 0x0d, 0x55, 0x70,
+	0x64, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x10, 0x0a, 0x03, 0x6b,
+	0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6b, 0x65, 0x79, 0x12, 0x14, 0x0a,
+	0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x76, 0x61,
+	0x6c, 0x75, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x70, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x02, 0x6f, 0x70, 0x12, 0x1b, 0x0a, 0x09, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x5f, 0x69, 0x64,
+	0x18, 0x04, 0x20, 0x01, 0x28, 0x03, 0x52, 0x08, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x49, 0x64,
+	0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x05,
+	0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x72, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x49, 0x64, 0x22,
+	0x32, 0x0a, 0x0b, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x23,
+	0x0a, 0x08, 0x65, 0x72, 0x72, 0x5f, 0x63, 0x6f, 0x64, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0e,
+	0x32, 0x08, 0x2e, 0x45, 0x72, 0x72, 0x43, 0x6f, 0x64, 0x65, 0x52, 0x07, 0x65, 0x72, 0x72, 0x43,
+	0x6f, 0x64, 0x65, 0x22, 0x5a, 0x0a, 0x0a, 0x47, 0x65, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
+	0x74, 0x12, 0x10, 0x0a, 0x03, 0x6b, 0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03,
+	0x6b, 0x65, 0x79, 0x12, 0x1b, 0x0a, 0x09, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x5f, 0x69, 0x64,
+	0x18, 0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x08, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x49, 0x64,
+	0x12, 0x1d, 0x0a, 0x0a, 0x72, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x03,
+	0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x72, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x49, 0x64, 0x22,
+	0x45, 0x0a, 0x08, 0x47, 0x65, 0x74, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x23, 0x0a, 0x08, 0x65,
+	0x72, 0x72, 0x5f, 0x63, 0x6f, 0x64, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0e, 0x32, 0x08, 0x2e,
+	0x45, 0x72, 0x72, 0x43, 0x6f, 0x64, 0x65, 0x52, 0x07, 0x65, 0x72, 0x72, 0x43, 0x6f, 0x64, 0x65,
+	0x12, 0x14, 0x0a, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x2a, 0x64, 0x0a, 0x07, 0x45, 0x72, 0x72, 0x43, 0x6f, 0x64,
+	0x65, 0x12, 0x10, 0x0a, 0x0c, 0x57, 0x52, 0x4f, 0x4e, 0x47, 0x5f, 0x4c, 0x45, 0x41, 0x44, 0x45,
+	0x52, 0x10, 0x00, 0x12, 0x06, 0x0a, 0x02, 0x4f, 0x4b, 0x10, 0x01, 0x12, 0x0a, 0x0a, 0x06, 0x4e,
+	0x4f, 0x5f, 0x4b, 0x45, 0x59, 0x10, 0x02, 0x12, 0x0b, 0x0a, 0x07, 0x54, 0x49, 0x4d, 0x45, 0x4f,
+	0x55, 0x54, 0x10, 0x03, 0x12, 0x13, 0x0a, 0x0f, 0x49, 0x4e, 0x56, 0x41, 0x4c, 0x49, 0x44, 0x5f,
+	0x53, 0x45, 0x53, 0x53, 0x49, 0x4f, 0x4e, 0x10, 0x04, 0x12, 0x11, 0x0a, 0x0d, 0x49, 0x4e, 0x56,
+	0x41, 0x4c, 0x49, 0x44, 0x5f, 0x54, 0x4f, 0x4b, 0x45, 0x4e, 0x10, 0x05, 0x32, 0xc2, 0x01, 0x0a,
+	0x08, 0x4b, 0x56, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72, 0x12, 0x38, 0x0a, 0x0c, 0x43, 0x6c, 0x65,
+	0x61, 0x72, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x14, 0x2e, 0x43, 0x6c, 0x65, 0x61,
+	0x72, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a,
+	0x12, 0x2e, 0x43, 0x6c, 0x65, 0x61, 0x72, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65,
+	0x70, 0x6c, 0x79, 0x12, 0x35, 0x0a, 0x0b, 0x4f, 0x70, 0x65, 0x6e, 0x53, 0x65, 0x73, 0x73, 0x69,
+	0x6f, 0x6e, 0x12, 0x13, 0x2e, 0x4f, 0x70, 0x65, 0x6e, 0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e,
+	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x11, 0x2e, 0x4f, 0x70, 0x65, 0x6e, 0x53, 0x65,
+	0x73, 0x73, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x1d, 0x0a, 0x03, 0x47, 0x65,
+	0x74, 0x12, 0x0b, 0x2e, 0x47, 0x65, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x09,
+	0x2e, 0x47, 0x65, 0x74, 0x52, 0x65, 0x70, 0x6c, 0x79, 0x12, 0x26, 0x0a, 0x06, 0x55, 0x70, 0x64,
+	0x61, 0x74, 0x65, 0x12, 0x0e, 0x2e, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75,
+	0x65, 0x73, 0x74, 0x1a, 0x0c, 0x2e, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x52, 0x65, 0x70, 0x6c,
+	0x79, 0x42, 0x0c, 0x5a, 0x0a, 0x2e, 0x3b, 0x6b, 0x76, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x62,
+	0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
@@ -409,27 +582,36 @@ func file_kvserver_proto_rawDescGZIP() []byte {
 	return file_kvserver_proto_rawDescData
 }
 
-var file_kvserver_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_kvserver_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_kvserver_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_kvserver_proto_goTypes = []interface{}{
-	(*OpenSessionArgs)(nil),  // 0: OpenSessionArgs
-	(*OpenSessionReply)(nil), // 1: OpenSessionReply
-	(*UpdateArgs)(nil),       // 2: UpdateArgs
-	(*UpdateReply)(nil),      // 3: UpdateReply
-	(*GetArgs)(nil),          // 4: GetArgs
-	(*GetReply)(nil),         // 5: GetReply
+	(ErrCode)(0),                // 0: ErrCode
+	(*ClearSessionRequest)(nil), // 1: ClearSessionRequest
+	(*ClearSessionReply)(nil),   // 2: ClearSessionReply
+	(*OpenSessionRequest)(nil),  // 3: OpenSessionRequest
+	(*OpenSessionReply)(nil),    // 4: OpenSessionReply
+	(*UpdateRequest)(nil),       // 5: UpdateRequest
+	(*UpdateReply)(nil),         // 6: UpdateReply
+	(*GetRequest)(nil),          // 7: GetRequest
+	(*GetReply)(nil),            // 8: GetReply
 }
 var file_kvserver_proto_depIdxs = []int32{
-	0, // 0: KVServer.OpenSession:input_type -> OpenSessionArgs
-	4, // 1: KVServer.Get:input_type -> GetArgs
-	2, // 2: KVServer.Update:input_type -> UpdateArgs
-	1, // 3: KVServer.OpenSession:output_type -> OpenSessionReply
-	5, // 4: KVServer.Get:output_type -> GetReply
-	3, // 5: KVServer.Update:output_type -> UpdateReply
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0, // 0: ClearSessionReply.err_code:type_name -> ErrCode
+	0, // 1: UpdateReply.err_code:type_name -> ErrCode
+	0, // 2: GetReply.err_code:type_name -> ErrCode
+	1, // 3: KVServer.ClearSession:input_type -> ClearSessionRequest
+	3, // 4: KVServer.OpenSession:input_type -> OpenSessionRequest
+	7, // 5: KVServer.Get:input_type -> GetRequest
+	5, // 6: KVServer.Update:input_type -> UpdateRequest
+	2, // 7: KVServer.ClearSession:output_type -> ClearSessionReply
+	4, // 8: KVServer.OpenSession:output_type -> OpenSessionReply
+	8, // 9: KVServer.Get:output_type -> GetReply
+	6, // 10: KVServer.Update:output_type -> UpdateReply
+	7, // [7:11] is the sub-list for method output_type
+	3, // [3:7] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_kvserver_proto_init() }
@@ -439,7 +621,7 @@ func file_kvserver_proto_init() {
 	}
 	if !protoimpl.UnsafeEnabled {
 		file_kvserver_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*OpenSessionArgs); i {
+			switch v := v.(*ClearSessionRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -451,7 +633,7 @@ func file_kvserver_proto_init() {
 			}
 		}
 		file_kvserver_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*OpenSessionReply); i {
+			switch v := v.(*ClearSessionReply); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -463,7 +645,7 @@ func file_kvserver_proto_init() {
 			}
 		}
 		file_kvserver_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*UpdateArgs); i {
+			switch v := v.(*OpenSessionRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -475,7 +657,7 @@ func file_kvserver_proto_init() {
 			}
 		}
 		file_kvserver_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*UpdateReply); i {
+			switch v := v.(*OpenSessionReply); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -487,7 +669,7 @@ func file_kvserver_proto_init() {
 			}
 		}
 		file_kvserver_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetArgs); i {
+			switch v := v.(*UpdateRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -499,6 +681,30 @@ func file_kvserver_proto_init() {
 			}
 		}
 		file_kvserver_proto_msgTypes[5].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*UpdateReply); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_kvserver_proto_msgTypes[6].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*GetRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_kvserver_proto_msgTypes[7].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*GetReply); i {
 			case 0:
 				return &v.state
@@ -516,13 +722,14 @@ func file_kvserver_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_kvserver_proto_rawDesc,
-			NumEnums:      0,
-			NumMessages:   6,
+			NumEnums:      1,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_kvserver_proto_goTypes,
 		DependencyIndexes: file_kvserver_proto_depIdxs,
+		EnumInfos:         file_kvserver_proto_enumTypes,
 		MessageInfos:      file_kvserver_proto_msgTypes,
 	}.Build()
 	File_kvserver_proto = out.File
