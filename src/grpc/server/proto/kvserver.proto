@@ -15,7 +15,14 @@ enum ErrCode {
     NO_KEY = 2;
     TIMEOUT = 3;
     INVALID_SESSION = 4;
-    INVALID_TOKEN = 5;
+    INVALID_OP = 5;
+    INVALID_TOKEN = 6;
+}
+
+enum Op {
+    PUT = 0;
+    APPEND = 1;
+    DELETE = 2;
 }
 
 message ClearSessionRequest {
@@ -32,13 +39,13 @@ message OpenSessionRequest {
 
 message OpenSessionReply {
     int64 client_id = 1;
-    string err_code = 2;
+    ErrCode err_code = 2;
 }
 
 message UpdateRequest {
     string key = 1;
     string value = 2;
-    string op = 3;           // "Put" or "Append" or "Delete"
+    Op op = 3;               // "Put" or "Append" or "Delete"
     int64 client_id = 4;     // client id
     int64 request_id = 5;    // client request id (increase monotonically)
 }
@@ -54,7 +61,7 @@ message GetRequest {
 }
 
 message GetReply {
-    ErrCode err_code = 1;
     string value = 2;
+    ErrCode err_code = 1;
 }
 
