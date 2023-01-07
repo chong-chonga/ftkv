@@ -11,38 +11,31 @@ import (
 	"log"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 const (
 	Log3AEnabled      = false
 	Log3BEnabled      = false
-	LogSessionEnabled = true
+	LogSessionEnabled = false
 )
 
-const RequestTimeout = time.Duration(250) * time.Millisecond
+const RequestTimeout = time.Duration(300) * time.Millisecond
 
 const SessionTimeout = 1 * time.Hour
 
-const (
-	OK                = "OK"
-	ErrNoKey          = "ErrNoKey"
-	ErrWrongLeader    = "ErrWrongLeader"
-	ErrTimeout        = "ErrTimeout"
-	ErrInvalidSession = "ErrInvalidSession"
-)
+const Token = "iqwcnksop19fakj129fsao)k12kfsj20-2jkfnak"
+
+const DefaultMaxRaftState = 30
 
 const (
-	OpenSession = "Open_Session"
-	GET         = "Get"
-	PUT         = "Put"
-	APPEND      = "Append"
-	DELETE      = "Delete"
+	ClearSession pb.Op = -2
+	OpenSession  pb.Op = -3
+	GET          pb.Op = -4
 )
 
 type Op struct {
-	OpType    string
+	OpType    pb.Op
 	Key       string
 	Value     string
 	ClientId  int64 // to detect duplicate request
@@ -59,12 +52,13 @@ type KVServer struct {
 	mu            sync.Mutex // big lock
 	me            int
 	maxRaftState  int
-	tempRequestId int64
+	cleanupIndex  int
 	rf            *raft.Raft
 	applyCh       chan raft.ApplyMsg
 	persister     *storage.Storage
 	replyChan     map[int]chan ApplyResult
 	sessionMap    map[int64]time.Time
+	snapshotIndex int
 
 	// persistent
 	commitIndex  int
@@ -73,8 +67,55 @@ type KVServer struct {
 	tab          map[string]string
 }
 
+//
+// StartKVServer starts a key/value server for rpc call which using raft to keep consistency
+//
+func StartKVServer(serverAddress []string, raftAddresses []string, me int, storageFile *storage.Storage, maxRaftState int) *KVServer {
+	// call safegob.Register on structures you want
+	// Go's RPC library to marshall/unmarshall.
+	safegob.Register(Op{})
+
+	kv := new(KVServer)
+	kv.me = me
+	kv.maxRaftState = maxRaftState
+	kv.persister = storageFile
+	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.replyChan = make(map[int]chan ApplyResult)
+	kv.sessionMap = make(map[int64]time.Time)
+	snapshot := storageFile.ReadSnapshot()
+	if nil != snapshot && len(snapshot) > 0 {
+		kv.recoverFrom(snapshot)
+	} else {
+		kv.requestMap = make(map[int64]int64)
+		kv.tab = make(map[string]string)
+		kv.nextClientId = 0
+		kv.commitIndex = 0
+	}
+	if maxRaftState > 0 {
+		if maxRaftState < DefaultMaxRaftState {
+			log.Println("info: the maxRaftState set is too small! set to default maxRaftState")
+			maxRaftState = DefaultMaxRaftState
+		}
+		kv.snapshotIndex = kv.commitIndex + maxRaftState
+	} else {
+		kv.snapshotIndex = -1
+	}
+
+	kv.rf = raft.StartRaft(raftAddresses, me, storageFile, kv.applyCh)
+	go kv.startApply()
+	go kv.cleanupSessions()
+
+	// start grpc server
+	listener, _ := net.Listen("tcp", serverAddress[me])
+	server := grpc.NewServer()
+	pb.RegisterKVServerServer(server, kv)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	return kv
+}
+
 func log3A(format string, a ...interface{}) {
-	// && (strings.Index(format, "lock") != -1 || strings.Index(format, "to ch") != -1)
 	if Log3AEnabled {
 		log.Printf(format, a...)
 	}
@@ -92,82 +133,59 @@ func logSession(format string, v ...interface{}) {
 	}
 }
 
-func (kv *KVServer) generateTempRequestId() int64 {
-	for {
-		current := kv.tempRequestId
-		if atomic.CompareAndSwapInt64(&kv.tempRequestId, current, current+1) {
-			return current
-		}
+func (kv *KVServer) ClearSession(_ context.Context, args *pb.ClearSessionRequest) (*pb.ClearSessionReply, error) {
+	reply := &pb.ClearSessionReply{}
+	if Token != args.Token {
+		reply.ErrCode = pb.ErrCode_INVALID_TOKEN
+		return reply, nil
 	}
+	command := Op{
+		OpType:    ClearSession,
+		Key:       "",
+		Value:     "",
+		ClientId:  -1,
+		RequestId: -1,
+	}
+	_, errCode := kv.submit(command)
+	if errCode == pb.ErrCode_OK {
+		reply.ErrCode = pb.ErrCode_OK
+	} else {
+		reply.ErrCode = errCode
+	}
+	return reply, nil
 }
 
-func (kv *KVServer) OpenSession(_ context.Context, args *pb.OpenSessionArgs) (*pb.OpenSessionReply, error) {
+func (kv *KVServer) OpenSession(_ context.Context, _ *pb.OpenSessionRequest) (*pb.OpenSessionReply, error) {
 	reply := &pb.OpenSessionReply{}
 	logSession("[%d] receive OpenSession request from client", kv.me)
 	reply.ClientId = -1
-	tempRequestId := kv.generateTempRequestId()
 	command := Op{
 		OpType:    OpenSession,
 		Key:       "",
 		Value:     "",
 		ClientId:  -1,
-		RequestId: tempRequestId,
+		RequestId: -1,
 	}
-	commandIndex, commandTerm, isLeader := kv.rf.Start(command)
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return reply, nil
-	}
-	kv.mu.Lock()
-	if c, _ := kv.replyChan[commandIndex]; c != nil {
-		reply.Err = ErrTimeout
-		kv.mu.Unlock()
-		return reply, nil
-	}
-	ch := make(chan ApplyResult, 1)
-	kv.replyChan[commandIndex] = ch
-	kv.mu.Unlock()
-
-	var res ApplyResult
-	select {
-	case res = <-ch:
-		break
-	case <-time.After(RequestTimeout):
-		kv.mu.Lock()
-		if c, _ := kv.replyChan[commandIndex]; c == nil {
-			res = <-ch
-			break
-		}
-		delete(kv.replyChan, commandIndex)
-		kv.mu.Unlock()
-		close(ch)
-		reply.Err = ErrTimeout
-		return reply, nil
-	}
-
-	if commandTerm == res.Term {
-		kv.mu.Lock()
-		kv.sessionMap[res.ClientId] = time.Now()
-		kv.mu.Unlock()
-		reply.ClientId = res.ClientId
-		reply.Err = OK
+	applyResult, errCode := kv.submit(command)
+	if errCode == pb.ErrCode_OK {
+		reply.ClientId = applyResult.ClientId
+		reply.ErrCode = pb.ErrCode_OK
 	} else {
-		kv.mu.Unlock()
-		reply.Err = ErrWrongLeader
+		reply.ErrCode = errCode
 	}
 	return reply, nil
 }
 
-func (kv *KVServer) Get(_ context.Context, args *pb.GetArgs) (*pb.GetReply, error) {
+func (kv *KVServer) Get(_ context.Context, args *pb.GetRequest) (*pb.GetReply, error) {
 	reply := &pb.GetReply{}
 	log3A("[%d] receive get request from client, requestId=%d", kv.me, args.RequestId)
-	kv.mu.Lock()
-	if _, valid := kv.sessionMap[args.ClientId]; valid {
-		kv.sessionMap[args.ClientId] = time.Now()
-		kv.mu.Unlock()
-	} else {
-		kv.mu.Unlock()
-		reply.Err = ErrInvalidSession
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.ErrCode = pb.ErrCode_WRONG_LEADER
+		return reply, nil
+	}
+	if !kv.isSessionValid(args.ClientId) {
+		reply.ErrCode = pb.ErrCode_INVALID_SESSION
 		return reply, nil
 	}
 	command := Op{
@@ -180,96 +198,81 @@ func (kv *KVServer) Get(_ context.Context, args *pb.GetArgs) (*pb.GetReply, erro
 	log3A("[%d] start requestId=%d", kv.me, args.RequestId)
 	// start时，不应当持有锁，因为这会阻塞 KVServer 接收来自 raft 的 log
 	// start的命令的返回值的唯一性已经由 raft 的互斥锁保证
-	commandIndex, commandTerm, isLeader := kv.rf.Start(command)
-
-	log3A("[%d] started requestId=%d", kv.me, args.RequestId)
-	if !isLeader {
-		log3A("[%d] refuse get request from client because this server is not a leader! requestId=%d", kv.me, args.RequestId)
-		reply.Err = ErrWrongLeader
-		return reply, nil
-	}
-	log3A("[%d] submit get request, requestId=%d,commandIndex=%d", kv.me, args.RequestId, commandIndex)
-
-	kv.mu.Lock()
-	if c, _ := kv.replyChan[commandIndex]; c != nil {
-		reply.Err = ErrTimeout
-		kv.mu.Unlock()
-		return reply, nil
-	}
-	ch := make(chan ApplyResult, 1)
-	kv.replyChan[commandIndex] = ch
-	kv.mu.Unlock()
-
-	var res ApplyResult
-	select {
-	case res = <-ch:
+	_, errCode := kv.submit(command)
+	if errCode == pb.ErrCode_OK {
 		kv.mu.Lock()
-		break
-	case <-time.After(RequestTimeout):
-		kv.mu.Lock()
-		if c, _ := kv.replyChan[commandIndex]; c == nil {
-			res = <-ch
-			break
-		}
-		// clean up
-		delete(kv.replyChan, commandIndex)
-		kv.mu.Unlock()
-		close(ch)
-		reply.Err = ErrTimeout
-		log3A("[%d] wait timeout, remove reply channel, requestId=%d", kv.me, args.RequestId)
-		return reply, nil
-	}
-
-	defer kv.mu.Unlock()
-	if res.Term == commandTerm {
 		if v, exist := kv.tab[args.Key]; !exist {
-			reply.Err = ErrNoKey
+			reply.ErrCode = pb.ErrCode_NO_KEY
 			reply.Value = ""
 		} else {
-			reply.Err = OK
+			reply.ErrCode = pb.ErrCode_OK
 			reply.Value = v
 		}
+		kv.mu.Unlock()
 	} else {
-		reply.Err = ErrWrongLeader
+		reply.ErrCode = errCode
 	}
+
 	return reply, nil
 }
 
-func (kv *KVServer) Update(c context.Context, args *pb.UpdateArgs) (*pb.UpdateReply, error) {
+func (kv *KVServer) Update(_ context.Context, args *pb.UpdateRequest) (*pb.UpdateReply, error) {
 	reply := &pb.UpdateReply{}
 	log3A("[%d] receive %v request from client, requestId=%d", kv.me, args.Op, args.RequestId)
-	kv.mu.Lock()
-	if _, valid := kv.sessionMap[args.ClientId]; valid {
-		kv.sessionMap[args.ClientId] = time.Now()
-		kv.mu.Unlock()
-	} else {
-		kv.mu.Unlock()
-		reply.Err = ErrInvalidSession
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.ErrCode = pb.ErrCode_WRONG_LEADER
+		return reply, nil
+	}
+	if !kv.isSessionValid(args.ClientId) {
+		reply.ErrCode = pb.ErrCode_INVALID_SESSION
+		return reply, nil
+	}
+
+	op := args.Op
+	if op != pb.Op_PUT && op != pb.Op_APPEND && op != pb.Op_DELETE {
+		reply.ErrCode = pb.ErrCode_INVALID_OP
 		return reply, nil
 	}
 	command := Op{
-		OpType:    args.Op,
+		OpType:    op,
 		Key:       args.Key,
 		Value:     args.Value,
 		ClientId:  args.ClientId,
 		RequestId: args.RequestId,
 	}
 	log3A("[%d] start requestId=%d", kv.me, args.RequestId)
-	commandIndex, commandTerm, isLeader := kv.rf.Start(command)
+	_, errCode := kv.submit(command)
+	reply.ErrCode = errCode
+	return reply, nil
+}
 
-	log3A("[%d] started requestId=%d", kv.me, args.RequestId)
-	if !isLeader {
-		log3A("[%d] refuse %v request from client because this server is not a leader!, requestId=%d", kv.me, args.Op, args.RequestId)
-		reply.Err = ErrWrongLeader
-		return reply, nil
+func (kv *KVServer) isSessionValid(clientId int64) bool {
+	kv.mu.Lock()
+	if _, valid := kv.sessionMap[clientId]; valid {
+		kv.sessionMap[clientId] = time.Now()
+		kv.mu.Unlock()
+		return true
 	}
-	log3A("[%d] submit %v request, requestId=%d,commandIndex=%d", kv.me, args.Op, args.RequestId, commandIndex)
+	kv.mu.Unlock()
+	return false
+}
+
+// submit
+// Submits an Op to Raft
+// If the submitted command reaches consensus successfully, the pointer points to the corresponding ApplyResult will be returned;
+// and the pb.ErrCode is pb.ErrCode_OK
+// otherwise, the returned *ApplyResult would be nil and the ErrCode indicating the reason why the command fails to complete
+func (kv *KVServer) submit(op Op) (*ApplyResult, pb.ErrCode) {
+	commandIndex, commandTerm, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		return nil, pb.ErrCode_WRONG_LEADER
+	}
 
 	kv.mu.Lock()
 	if c, _ := kv.replyChan[commandIndex]; c != nil {
-		reply.Err = ErrTimeout
 		kv.mu.Unlock()
-		return reply, nil
+		return nil, pb.ErrCode_TIMEOUT
 	}
 	ch := make(chan ApplyResult, 1)
 	kv.replyChan[commandIndex] = ch
@@ -278,29 +281,34 @@ func (kv *KVServer) Update(c context.Context, args *pb.UpdateArgs) (*pb.UpdateRe
 	var res ApplyResult
 	select {
 	case res = <-ch:
-		kv.mu.Lock()
 		break
 	case <-time.After(RequestTimeout):
 		kv.mu.Lock()
-		if c, _ := kv.replyChan[commandIndex]; c == nil {
+		if _, deleted := kv.replyChan[commandIndex]; deleted {
+			kv.mu.Unlock()
 			res = <-ch
 			break
 		}
+		// clean up
 		delete(kv.replyChan, commandIndex)
 		kv.mu.Unlock()
+		// is current raft still leader?
+		_, isLeader := kv.rf.GetState()
+		var errCode pb.ErrCode
+		if isLeader {
+			errCode = pb.ErrCode_TIMEOUT
+		} else {
+			errCode = pb.ErrCode_WRONG_LEADER
+		}
 		close(ch)
-		reply.Err = ErrTimeout
-		log3A("[%d] wait timeout, remove reply channel, requestId=%d", kv.me, args.RequestId)
-		return reply, nil
+		return nil, errCode
 	}
-	defer kv.mu.Unlock()
-
+	// log's index and term identifies the unique log
 	if res.Term == commandTerm {
-		reply.Err = OK
+		return &res, pb.ErrCode_OK
 	} else {
-		reply.Err = ErrWrongLeader
+		return nil, pb.ErrCode_WRONG_LEADER
 	}
-	return reply, nil
 }
 
 func (kv *KVServer) makeSnapshot() []byte {
@@ -316,7 +324,7 @@ func (kv *KVServer) makeSnapshot() []byte {
 	return w.Bytes()
 }
 
-func (kv *KVServer) readSnapshot(snapshot []byte) {
+func (kv *KVServer) recoverFrom(snapshot []byte) {
 	// bootstrap without snapshot ?
 	if snapshot == nil || len(snapshot) < 1 {
 		return
@@ -354,21 +362,26 @@ func (kv *KVServer) startApply() {
 				Term: msg.CommandTerm,
 			}
 			kv.mu.Lock()
-			if OpenSession == commandType {
+			if ClearSession == commandType {
+				kv.sessionMap = make(map[int64]time.Time)
+				kv.requestMap = make(map[int64]int64)
+				kv.nextClientId = 1
+			} else if OpenSession == commandType {
+				kv.sessionMap[kv.nextClientId] = time.Now()
 				result.ClientId = kv.nextClientId
 				kv.nextClientId++
 				logSession("[%d] open a new session, clientId=%d", kv.me, result.ClientId)
 			} else {
 				if id, exists := kv.requestMap[op.ClientId]; !exists || requestId > id {
-					if APPEND == commandType {
+					if pb.Op_PUT == commandType {
+						kv.tab[op.Key] = op.Value
+						log3A("[%d] execute put %s on key=%v, clientId=%d,requestId=%d", kv.me, op.Value, op.Key, op.ClientId, op.RequestId)
+					} else if pb.Op_APPEND == commandType {
 						v := kv.tab[op.Key]
 						v += op.Value
 						kv.tab[op.Key] = v
 						log3A("[%d] execute append %s on key=%v, now value is %s, clientId=%d,requestId=%d", kv.me, op.Value, op.Key, v, op.ClientId, op.RequestId)
-					} else if PUT == commandType {
-						kv.tab[op.Key] = op.Value
-						log3A("[%d] execute put %s on key=%v, clientId=%d,requestId=%d", kv.me, op.Value, op.Key, op.ClientId, op.RequestId)
-					} else if DELETE == commandType {
+					} else if pb.Op_DELETE == commandType {
 						delete(kv.tab, op.Key)
 						log3A("[%d execute delete on key=%v, clientId=%d,requestId=%d", kv.me, op.Key, op.ClientId, op.RequestId)
 					} else if GET != commandType {
@@ -387,7 +400,8 @@ func (kv *KVServer) startApply() {
 				delete(kv.replyChan, kv.commitIndex)
 				log3A("[%d] close requestId=%d ch", kv.me, op.RequestId)
 			}
-			if kv.maxRaftState >= 0 && kv.persister.RaftStateSize() >= kv.maxRaftState {
+			if kv.maxRaftState > 0 && kv.commitIndex == kv.snapshotIndex {
+				kv.snapshotIndex += kv.maxRaftState
 				snapshot := kv.makeSnapshot()
 				go kv.rf.Snapshot(kv.commitIndex, snapshot)
 			}
@@ -400,7 +414,7 @@ func (kv *KVServer) startApply() {
 				if kv.rf.CondInstallSnapshot(lastIncludedTerm, lastIncludedIndex, snapshot) {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
-					kv.readSnapshot(snapshot)
+					kv.recoverFrom(snapshot)
 				}
 			}(lastIncludedTerm, lastIncludedIndex, snapshot)
 		} else {
@@ -415,67 +429,16 @@ func (kv *KVServer) cleanupSessions() {
 		time.Sleep(SessionTimeout)
 		kv.mu.Lock()
 		var deleteArr []int64
-		for c := range kv.requestMap {
-			lastVisitTime, visit := kv.sessionMap[c]
+
+		for clientId := range kv.sessionMap {
+			lastVisitTime, visit := kv.sessionMap[clientId]
 			if !visit || time.Since(lastVisitTime) >= SessionTimeout {
-				deleteArr = append(deleteArr, c)
+				deleteArr = append(deleteArr, clientId)
 			}
 		}
 		for _, c := range deleteArr {
 			delete(kv.sessionMap, c)
-			delete(kv.requestMap, c)
 		}
 		kv.mu.Unlock()
 	}
-}
-
-//
-// StartKVServer starts a key/value server for rpc call which using raft to keep consistency
-//
-func StartKVServer(serverAddress []string, me int, storageFile *storage.Storage, maxraftstate int) *KVServer {
-	// call safegob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
-	safegob.Register(Op{})
-
-	kv := new(KVServer)
-	kv.me = me
-	kv.maxRaftState = maxraftstate
-	kv.tempRequestId = 0
-	kv.persister = storageFile
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.replyChan = make(map[int]chan ApplyResult)
-	kv.sessionMap = make(map[int64]time.Time)
-	snapshot := storageFile.ReadSnapshot()
-	if nil != snapshot && len(snapshot) > 0 {
-		kv.readSnapshot(snapshot)
-	} else {
-		kv.requestMap = make(map[int64]int64)
-		kv.tab = make(map[string]string)
-		kv.nextClientId = 0
-		kv.commitIndex = 0
-	}
-	kv.rf = raft.StartRaft(serverAddress, me, storageFile, kv.applyCh)
-	go kv.startApply()
-	go kv.cleanupSessions()
-
-	// start rpc server
-	//server := rpc2.NewServer()
-	//err := server.Register(kv)
-	//if err != nil {
-	//	log.Fatalln("start K/V server fail! errorInfo:", err)
-	//}
-	//err = server.Register(kv.rf)
-	//if err != nil {
-	//	log.Fatalln("start K/V server fail! errorInfo:", err)
-	//}
-	//mux := http.NewServeMux()
-	//mux.Handle("/", server)
-	//go http.ListenAndServe(serverAddress[me], server)
-
-	// start grpc server
-	net, _ := net.Listen("tcp", serverAddress[me])
-	server := grpc.NewServer()
-	pb.RegisterKVServerServer(server, kv)
-	go server.Serve(net)
-	return kv
 }
