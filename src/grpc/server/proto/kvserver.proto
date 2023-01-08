@@ -13,10 +13,9 @@ enum ErrCode {
     WRONG_LEADER = 0;
     OK = 1;
     NO_KEY = 2;
-    TIMEOUT = 3;
-    INVALID_SESSION = 4;
-    INVALID_OP = 5;
-    INVALID_TOKEN = 6;
+    INVALID_SESSION = 3;
+    INVALID_OP = 4;
+    INVALID_TOKEN = 5;
 }
 
 enum Op {
