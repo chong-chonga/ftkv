@@ -20,7 +20,7 @@ const (
 	LogSessionEnabled = false
 )
 
-const RequestTimeout = time.Duration(300) * time.Millisecond
+//const RequestTimeout = time.Duration(300) * time.Millisecond
 
 const SessionTimeout = 1 * time.Hour
 
@@ -268,41 +268,22 @@ func (kv *KVServer) submit(op Op) (*ApplyResult, pb.ErrCode) {
 	if !isLeader {
 		return nil, pb.ErrCode_WRONG_LEADER
 	}
-
+	// leader1(current leader) may be partitioned by itself,
+	// its log may be trimmed by leader2 (if and only if leader2's term > leader1's term)
+	// but len(leader2's log) may less than len(leader1's log)
+	// if leader1 becomes leader again, then commands submitted later may get the same log index
+	// that's to say, previously submitted commands will never be completed
 	kv.mu.Lock()
 	if c, _ := kv.replyChan[commandIndex]; c != nil {
-		kv.mu.Unlock()
-		return nil, pb.ErrCode_TIMEOUT
+		// tell the previous client to stop waiting
+		c <- ApplyResult{Term: commandTerm}
+		close(c)
 	}
 	ch := make(chan ApplyResult, 1)
 	kv.replyChan[commandIndex] = ch
 	kv.mu.Unlock()
 
-	var res ApplyResult
-	select {
-	case res = <-ch:
-		break
-	case <-time.After(RequestTimeout):
-		kv.mu.Lock()
-		if _, deleted := kv.replyChan[commandIndex]; deleted {
-			kv.mu.Unlock()
-			res = <-ch
-			break
-		}
-		// clean up
-		delete(kv.replyChan, commandIndex)
-		kv.mu.Unlock()
-		// is current raft still leader?
-		_, isLeader := kv.rf.GetState()
-		var errCode pb.ErrCode
-		if isLeader {
-			errCode = pb.ErrCode_TIMEOUT
-		} else {
-			errCode = pb.ErrCode_WRONG_LEADER
-		}
-		close(ch)
-		return nil, errCode
-	}
+	res := <-ch
 	// log's index and term identifies the unique log
 	if res.Term == commandTerm {
 		return &res, pb.ErrCode_OK
