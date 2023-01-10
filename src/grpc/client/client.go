@@ -2,36 +2,31 @@ package client
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"log"
 	"sync/atomic"
+	"time"
 )
 
 import "crypto/rand"
 import "math/big"
 import pb "kvraft/src/grpc/server/proto"
 
-const (
-	OK                = "OK"
-	ErrNoKey          = "ErrNoKey"
-	ErrWrongLeader    = "ErrWrongLeader"
-	ErrTimeout        = "ErrTimeout"
-	ErrInvalidSession = "ErrInvalidSession"
-)
+const LogEnabled = true
 
-const (
-	OpenSession = "Open_Session"
-	GET         = "Get"
-	PUT         = "Put"
-	APPEND      = "Append"
-	DELETE      = "Delete"
-)
+func logInfo(v ...any) {
+	if LogEnabled {
+		log.Println(v...)
+	}
+}
 
-const Log3AEnabled = false
+const RPCTimeout = 3 * time.Second
 
-type Clerk struct {
+type KVClient struct {
 	rpcClients    []pb.KVServerClient
 	serverCount   int
 	lastLeader    int
@@ -39,66 +34,30 @@ type Clerk struct {
 	nextRequestId int64
 }
 
-func log3A(format string, a ...interface{}) {
-	// && (strings.Index(format, "lock") != -1 || strings.Index(format, "to ch") != -1)
-	if Log3AEnabled {
-		log.Printf(format, a...)
-	}
-}
-
-func MakeClerk(serverAddresses []string) *Clerk {
-	ck := new(Clerk)
-	var clients []pb.KVServerClient
-	for _, addr := range serverAddresses {
+func DailClient(serverAddresses []string) *KVClient {
+	ck := new(KVClient)
+	ck.serverCount = len(serverAddresses)
+	var clients = make([]pb.KVServerClient, ck.serverCount)
+	for i, addr := range serverAddresses {
 		conn, _ := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		client := pb.NewKVServerClient(conn)
-		clients = append(clients, client)
+		clients[i] = pb.NewKVServerClient(conn)
 	}
 	ck.rpcClients = clients
-	// You'll have to add code here.
-	ck.serverCount = len(clients)
 	ck.lastLeader = -1
 	ck.nextRequestId = 1
-	ck.openSession()
+	go func() {
+		_ = ck.openSession(ck.chooseServer())
+	}()
 	return ck
-}
-
-func (c *Clerk) openSession() {
-	args := &pb.OpenSessionArgs{}
-	server := c.chooseServer()
-	maxFail := c.serverCount
-	for i := 0; i < maxFail; {
-		reply, err := c.sendOpenSession(server, args)
-		fmt.Println(reply.Err)
-		ok := err == nil
-		if ok {
-			if reply.Err == ErrTimeout {
-				i++
-				continue
-			}
-			if reply.Err == OK {
-				log.Println("clientId is ", reply.ClientId)
-				c.lastLeader = server
-				c.ClientId = reply.ClientId
-				c.nextRequestId = 1
-				return
-			}
-		} else {
-			i++
-			fmt.Println(err)
-		}
-		server = (server + 1) % c.serverCount
-	}
-	log.Fatalln("can't connect to server!")
 }
 
 // 1. 使用UUID
 // 2. 使用原子递增的clientID和原子递增的requestId
-func (ck *Clerk) getRequestId() int64 {
+func (c *KVClient) getRequestId() int64 {
 	for {
-		current := ck.nextRequestId
+		current := c.nextRequestId
 		next := current + 1
-		if atomic.CompareAndSwapInt64(&ck.nextRequestId, current, next) {
+		if atomic.CompareAndSwapInt64(&c.nextRequestId, current, next) {
 			return current
 		}
 	}
@@ -111,7 +70,7 @@ func randN(n int) int {
 	return int(x)
 }
 
-func (c *Clerk) chooseServer() int {
+func (c *KVClient) chooseServer() int {
 	if c.lastLeader != -1 {
 		return c.lastLeader
 	} else {
@@ -119,74 +78,176 @@ func (c *Clerk) chooseServer() int {
 	}
 }
 
-func (ck *Clerk) sendOpenSession(server int, args *pb.OpenSessionArgs) (*pb.OpenSessionReply, error) {
-	return ck.rpcClients[server].OpenSession(context.Background(), args)
+func (c *KVClient) sendClearSession(server int, args *pb.ClearSessionRequest) (*pb.ClearSessionReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), RPCTimeout)
+	defer cancel()
+	return c.rpcClients[server].ClearSession(ctx, args)
 }
 
-func (ck *Clerk) sendGet(server int, args *pb.GetArgs) (*pb.GetReply, error) {
-	return ck.rpcClients[server].Get(context.Background(), args)
+func (c *KVClient) sendOpenSession(server int, args *pb.OpenSessionRequest) (*pb.OpenSessionReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), RPCTimeout)
+	defer cancel()
+	return c.rpcClients[server].OpenSession(ctx, args)
 }
 
-func (ck *Clerk) sendUpdate(server int, args *pb.UpdateArgs) (*pb.UpdateReply, error) {
-	return ck.rpcClients[server].Update(context.Background(), args)
+func (c *KVClient) sendGet(server int, args *pb.GetRequest) (*pb.GetReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), RPCTimeout)
+	defer cancel()
+	return c.rpcClients[server].Get(ctx, args)
 }
 
-//
-// fetch the current value for a key.
-// returns "" if the key does not exist.
-// keeps trying forever in the face of all other errors.
-//
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
-//
-func (ck *Clerk) Get(key string) string {
+func (c *KVClient) sendUpdate(server int, args *pb.UpdateRequest) (*pb.UpdateReply, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), RPCTimeout)
+	defer cancel()
+	return c.rpcClients[server].Update(ctx, args)
+}
 
-	// You will have to modify this function.
-	args := pb.GetArgs{
-		Key:       key,
-		ClientId:  ck.ClientId,
-		RequestId: ck.getRequestId(),
+func (c *KVClient) openSession(server int) error {
+	if server > c.serverCount || server < 0 {
+		server = c.chooseServer()
+		log.Println("provided server[", server, "]not exists, choose random server instead")
 	}
-	server := ck.chooseServer()
-	maxFail := ck.serverCount
-	var e error
-	var reply *pb.GetReply
-	for i := 0; i < maxFail; {
-		log3A("client send get request to server %d, requestId=%d", server, args.RequestId)
-		reply, e = ck.sendGet(server, &args)
-		ok := e == nil
-		if ok {
-			err := reply.Err
-			log3A("client receive get response from server %d, requestId=%d,err=%s", server, args.RequestId, err)
-			if err == OK || err == ErrNoKey {
-				ck.lastLeader = server
-				value := ""
-				if err != ErrNoKey {
-					value = reply.Value
-				}
-				return value
-			}
-			if err == ErrTimeout {
-				i++
-				continue
-			}
-			if err == ErrInvalidSession {
-				ck.openSession()
+	args := &pb.OpenSessionRequest{}
+	maxFail := c.serverCount
+	var errorMsg string
+	timeout := false
+	for i := 0; i < maxFail; i++ {
+		reply, err := c.sendOpenSession(server, args)
+		if err == nil {
+			if reply.ErrCode == pb.ErrCode_OK {
+				logInfo("client open a new session, clientId=", reply.ClientId)
+				c.lastLeader = server
+				c.ClientId = reply.ClientId
+				c.nextRequestId = 1
+				return nil
 			}
 		} else {
-			i++
+			logInfo(err)
+			s, _ := status.FromError(err)
+			code := s.Code()
+			if codes.DeadlineExceeded == code {
+				// cannot reach consensus before timeout
+				timeout = true
+				errorMsg = "request timeout, please try again later"
+				break
+			}
+		}
+		server = (server + 1) % c.serverCount
+		logInfo("request fail to finish, switch to server[", server, "]")
+	}
+	if !timeout {
+		errorMsg = "error while connecting to the server, please check the server configuration"
+	}
+	return errors.New(errorMsg)
+}
+
+func (c *KVClient) ClearSession(token string) error {
+	args := &pb.ClearSessionRequest{
+		Token: token,
+	}
+	server := c.chooseServer()
+	maxFail := c.serverCount
+	var e error
+	var errorMsg string
+	var reply *pb.ClearSessionReply
+	timeout := false
+	for i := 0; i < maxFail; i++ {
+		reply, e = c.sendClearSession(server, args)
+		if e == nil {
+			err := reply.ErrCode
+			if err == pb.ErrCode_OK {
+				c.lastLeader = server
+				// success
+				return nil
+			}
+			if err == pb.ErrCode_INVALID_TOKEN {
+				logInfo("error: unknown token, please check the token is correct!")
+				return errors.New("invalid token")
+			}
+		} else {
+			logInfo(e)
+			s, _ := status.FromError(e)
+			code := s.Code()
+			if codes.DeadlineExceeded == code {
+				// cannot reach consensus before timeout
+				timeout = true
+				errorMsg = "request timeout, please try again later"
+				break
+			}
 		}
 		// fail
 		// switch to next server ...
-		server = (server + 1) % ck.serverCount
-		log3A("request fail to finish, switch to next server=%d", server)
+		server = (server + 1) % c.serverCount
+		logInfo("request fail to finish, switch to server[", server, "]")
 	}
-	log.Fatalln("can't connect to server!")
-	return ""
+	if !timeout {
+		errorMsg = "error while connecting to the server, please check the server configuration"
+	}
+	return errors.New(errorMsg)
+}
+
+//
+// Get fetch the current value for a key.
+// returns "" if the key does not exist.
+// keeps trying forever in the face of all other errors.
+//
+func (c *KVClient) Get(key string) (string, error) {
+	var e error
+	if c.ClientId == -1 {
+		e = c.openSession(c.chooseServer())
+		if e != nil {
+			return "", e
+		}
+	}
+	args := pb.GetRequest{
+		Key:       key,
+		ClientId:  c.ClientId,
+		RequestId: c.getRequestId(),
+	}
+	server := c.chooseServer()
+	maxFail := c.serverCount
+
+	var errorMsg string
+	timeout := false
+	var reply *pb.GetReply
+	for i := 0; i < maxFail; i++ {
+		logInfo("client send get request to server[", server, "] clientId=", args.ClientId, "requestId=", args.RequestId)
+		reply, e = c.sendGet(server, &args)
+		if e == nil {
+			errCode := reply.ErrCode
+			logInfo("client receive get response from  server[", server, "] clientId=", args.ClientId, "requestId=", args.RequestId, "err=", errCode)
+			if errCode == pb.ErrCode_OK || errCode == pb.ErrCode_NO_KEY {
+				c.lastLeader = server
+				value := ""
+				if errCode != pb.ErrCode_NO_KEY {
+					value = reply.Value
+				}
+				return value, nil
+			}
+			if errCode == pb.ErrCode_INVALID_SESSION {
+				c.ClientId = -1
+				return "", errors.New("session expired, please try again")
+			}
+		} else {
+			logInfo(e)
+			s, _ := status.FromError(e)
+			code := s.Code()
+			if codes.DeadlineExceeded == code {
+				// cannot reach consensus before timeout
+				timeout = true
+				errorMsg = "request timeout, please try again later"
+				break
+			}
+		}
+		// fail
+		// switch to next server ...
+		server = (server + 1) % c.serverCount
+		logInfo("request fail to finish, switch to server[", server, "]")
+	}
+	if !timeout {
+		errorMsg = "error while connecting to the server, please check the server configuration"
+	}
+	return "", errors.New(errorMsg)
 }
 
 //
@@ -199,53 +260,69 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 //
-func (ck *Clerk) update(key string, value string, op string) {
-	// You will have to modify this function.
-	args := pb.UpdateArgs{
+func (c *KVClient) update(key string, value string, op pb.Op) error {
+	var e error
+	if c.ClientId == -1 {
+		e = c.openSession(c.chooseServer())
+		if e != nil {
+			return e
+		}
+	}
+	args := pb.UpdateRequest{
 		Key:       key,
 		Value:     value,
 		Op:        op,
-		ClientId:  ck.ClientId,
-		RequestId: ck.getRequestId(),
+		ClientId:  c.ClientId,
+		RequestId: c.getRequestId(),
 	}
-	server := ck.chooseServer()
-	maxFail := ck.serverCount
-	for i := 0; i < maxFail; {
-		log3A("client send get request to server %d, requestId=%d", server, args.RequestId)
-		reply, e := ck.sendUpdate(server, &args)
-		ok := e == nil
-		if ok {
-			err := reply.Err
-			log3A("client receive %v response from server %d, requestId=%d,err=%s", op, server, args.RequestId, err)
-			if err == OK {
-				ck.lastLeader = server
+	server := c.chooseServer()
+	maxFail := c.serverCount
+	var errorMsg string
+	timeout := false
+	var reply *pb.UpdateReply
+	for i := 0; i < maxFail; i++ {
+		reply, e = c.sendUpdate(server, &args)
+
+		if e == nil {
+			errCode := reply.ErrCode
+			if errCode == pb.ErrCode_OK {
+				c.lastLeader = server
 				// success
-				return
+				return nil
 			}
-			if err == ErrTimeout {
-				i++
-				continue
-			}
-			if err == ErrInvalidSession {
-				ck.openSession()
+			if errCode == pb.ErrCode_INVALID_SESSION {
+				c.ClientId = -1
+				return errors.New("session expired, please try again")
 			}
 		} else {
-			i++
+			logInfo(e)
+			s, _ := status.FromError(e)
+			code := s.Code()
+			if codes.DeadlineExceeded == code {
+				// cannot reach consensus before timeout
+				timeout = true
+				errorMsg = "request timeout, please try again later"
+				break
+			}
 		}
+
 		// fail
 		// switch to next server ...
-		server = (server + 1) % ck.serverCount
-		log3A("request fail to finish, switch to next server=%d", server)
+		server = (server + 1) % c.serverCount
+		logInfo("request fail to finish, switch to server[", server, "]")
 	}
-	log.Fatalln("can't connect to server!")
+	if !timeout {
+		errorMsg = "error while connecting to the server, please check the server configuration"
+	}
+	return errors.New(errorMsg)
 }
 
-func (ck *Clerk) Put(key string, value string) {
-	ck.update(key, value, PUT)
+func (ck *KVClient) Put(key string, value string) error {
+	return ck.update(key, value, pb.Op_PUT)
 }
-func (ck *Clerk) Append(key string, value string) {
-	ck.update(key, value, APPEND)
+func (ck *KVClient) Append(key string, value string) error {
+	return ck.update(key, value, pb.Op_APPEND)
 }
-func (ck *Clerk) Delete(key string) {
-	ck.update(key, "", DELETE)
+func (ck *KVClient) Delete(key string) error {
+	return ck.update(key, "", pb.Op_DELETE)
 }
