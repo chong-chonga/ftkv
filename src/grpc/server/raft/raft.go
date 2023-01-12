@@ -147,12 +147,20 @@ var errNilStorage = errors.New("storage is nil")
 // StartRaft start raft server for service
 // raftAddresses are other raft's ip address
 // port specifies the raft server port
+// me in the cluster shouldn't be duplicate but the order of raftAddresses can be random
 func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, applyCh chan ApplyMsg) (*Raft, error) {
 	rf := &Raft{}
 	rf.servers = len(raftAddresses) + 1
 	if rf.servers&1 == 0 {
 		return nil, &RuntimeError{Stage: "start raft", Err: errEvenRafts}
 	}
+	if port <= 0 {
+		return nil, &RuntimeError{Stage: "start raft", Err: errInvalidPort}
+	}
+	if storage == nil {
+		return nil, &RuntimeError{Stage: "start raft", Err: errNilStorage}
+	}
+	// init rpc clients
 	rf.peers = make([]*rpc.Peer, len(raftAddresses))
 	for i := 0; i < len(raftAddresses); i++ {
 		rf.peers[i] = rpc.MakePeer(raftAddresses[i])
@@ -182,9 +190,6 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	rf.lastApplied = 0
 	rf.lastAppliedTerm = 0
 	// initialize from persisted state
-	if storage == nil {
-		return nil, &RuntimeError{Stage: "start raft", Err: errNilStorage}
-	}
 	err := rf.recoverFrom(storage.ReadRaftState())
 	if err != nil {
 		return nil, &RuntimeError{Stage: "start raft", Err: err}
@@ -195,9 +200,6 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	rf.snapshot = storage.ReadSnapshot()
 
 	// start go rpc server
-	if port <= 0 {
-		return nil, &RuntimeError{Stage: "start raft", Err: errInvalidPort}
-	}
 	server := rpc2.NewServer()
 	err = server.Register(rf)
 	if err != nil {
@@ -780,7 +782,6 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) attemptElection() {
 	rf.mu.Lock()
-
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	err := rf.persist()
@@ -815,9 +816,6 @@ func (rf *Raft) attemptElection() {
 		go func(server int) {
 			reply := RequestVoteReply{}
 			logElection("[%d] request vote from %d in term %d", rf.me, server, args.Term)
-			// Call() sends a request and waits for a reply. If a reply arrives
-			// within a timeout interval, Call() returns true; otherwise
-			// Call() returns false. Thus Call() may not return for a while.
 			ok := rf.sendRequestVote(server, &args, &reply)
 			if ok {
 				rf.mu.Lock()
@@ -827,6 +825,7 @@ func (rf *Raft) attemptElection() {
 					rf.currentTerm = reply.Term
 					rf.role = Follower
 					rf.votedFor = -1
+					err = rf.persist()
 					if err != nil {
 						panic(err.Error())
 					}
@@ -1023,6 +1022,9 @@ func majorityCommitIndex(rf *Raft) int {
 	sort.Ints(arr)
 	index := rf.commitIndex
 	midCommit := arr[servers>>1]
+	// if leader replicates an entry from its current term on a majority of the servers before crashing
+	// then this entry is committed
+	// according to Figure 8
 	for i = midCommit; i >= rf.commitIndex+1; i-- {
 		if rf.log[i-rf.lastIncludedIndex-1].Term == rf.currentTerm {
 			return i
