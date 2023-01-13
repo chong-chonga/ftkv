@@ -1,22 +1,5 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
-// rf = Make(...)
-//   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
-//   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is Leader
-// ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
-//   should send an ApplyMsg to the service (or tester)
-//   in the same server.
-//
-
 import (
 	"bytes"
 	"encoding/gob"
@@ -73,6 +56,10 @@ func logSnapshot(format string, v ...interface{}) {
 	}
 }
 
+const MaxLogsPerApply = 20
+
+const ApplyLogInterval = 20 * time.Millisecond
+
 // ApplyMsg
 // as each Raft peer becomes aware that successive log entries are committed,
 // the peer send an ApplyMsg to the service on the same server, via the applyCh.
@@ -120,14 +107,14 @@ type Raft struct {
 	lastIncludedIndex int        // persistent
 	lastIncludedTerm  int        // persistent
 
-	commitIndex      int           // index of the highest log entry known to be committed (initialized to 0)
-	lastApplied      int           // index of the highest log entry known to be applied to state machine (initialized to 0)
-	lastAppliedTerm  int           // term of lastApplied
-	role             string        // server role
-	applyCh          chan ApplyMsg // for raft to send committed log and snapshot
-	electionTimeout  int64         // time to start a new election, milliseconds
-	minMajorityVotes int           // the minimum number of votes required to become a leader
-	servers          int           // number of raft servers in cluster
+	commitIndex      int             // index of the highest log entry known to be committed (initialized to 0)
+	lastApplied      int             // index of the highest log entry known to be applied to state machine (initialized to 0)
+	lastAppliedTerm  int             // term of lastApplied
+	role             string          // server role
+	applyCh          chan []ApplyMsg // for raft to send committed log and snapshot
+	electionTimeout  int64           // time to start a new election, milliseconds
+	minMajorityVotes int             // the minimum number of votes required to become a leader
+	servers          int             // number of raft servers in cluster
 
 	// for snapshot
 	snapshot []byte // in-memory snapshot
@@ -148,7 +135,7 @@ var errNilStorage = errors.New("storage is nil")
 // raftAddresses are other raft's ip address
 // port specifies the raft server port
 // me in the cluster shouldn't be duplicate but the order of raftAddresses can be random
-func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, applyCh chan ApplyMsg) (*Raft, error) {
+func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, applyCh chan []ApplyMsg) (*Raft, error) {
 	rf := &Raft{}
 	rf.servers = len(raftAddresses) + 1
 	if rf.servers&1 == 0 {
@@ -221,11 +208,11 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 }
 
 // recoverFrom restore previously persisted state.
-func (rf *Raft) recoverFrom(data []byte) error {
-	if data == nil || len(data) < 1 {
+func (rf *Raft) recoverFrom(state []byte) error {
+	if state == nil || len(state) < 1 {
 		return nil
 	}
-	buf := bytes.NewBuffer(data)
+	buf := bytes.NewBuffer(state)
 	d := safegob.NewDecoder(buf)
 
 	var currentTerm int
@@ -275,31 +262,31 @@ func (rf *Raft) applyLog() {
 			startIndex := lastApplied + 1
 			endIndex := commitIndex
 			commandIndex := startIndex
-			index := startIndex - rf.lastIncludedIndex - 1
-			var logTerm int
-			for commandIndex <= endIndex {
-				logTerm = rf.log[index].Term
-				msg := ApplyMsg{
-					CommandValid: true,
-					Command:      rf.log[index].Command,
-					CommandIndex: commandIndex,
-					CommandTerm:  logTerm,
-				}
-
-				rf.applyCh <- msg
-				commandIndex++
-				if commandIndex%10 == 0 {
-					break
-				}
-				index++
-				//log.Printf("[%d] applyLog, commandIndex=%d, endIndex=%d, loglength=%d", rf.me, commandIndex, endIndex, len(rf.log))
+			count := endIndex - startIndex + 1
+			if count > MaxLogsPerApply {
+				count = MaxLogsPerApply
 			}
+			logs := make([]ApplyMsg, count)
+			// if lastIncludedIndex is -1, then i = lastApplied + 1
+			// otherwise, i = lastApplied + 1 - offset
+			i := startIndex - rf.lastIncludedIndex - 1
+			for j := 0; j < len(logs); j++ {
+				logs[j] = ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[i].Command,
+					CommandIndex: commandIndex,
+					CommandTerm:  rf.log[i].Term,
+				}
+				commandIndex++
+				i++
+			}
+			rf.applyCh <- logs
 			rf.lastApplied = commandIndex - 1
-			rf.lastAppliedTerm = logTerm
-			logAppendEntry("[%d] apply log in [%d, %d]", rf.me, startIndex, commandIndex-1)
+			rf.lastAppliedTerm = logs[count-1].CommandTerm
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
-		time.Sleep(20 * time.Millisecond)
+
+		time.Sleep(ApplyLogInterval)
 	}
 }
 
@@ -734,14 +721,18 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		termChanged = true
 	}
 
-	applyMsg := ApplyMsg{
+	if rf.lastIncludedIndex > args.LastIncludedIndex || args.LastIncludedTerm > args.LastIncludedTerm {
+		return nil
+	}
+	logs := make([]ApplyMsg, 1)
+	logs[0] = ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
 		SnapshotIndex: args.LastIncludedIndex,
 		SnapshotTerm:  args.LastIncludedTerm,
 	}
 	logSnapshot("[%d] receive snapshot from %d, lastIncludedIndex=%d, lastIncludedTerm=%d", rf.me, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
-	rf.applyCh <- applyMsg
+	rf.applyCh <- logs
 	rf.electionTimeout = randomElectionTimeout()
 	return nil
 }
@@ -1009,7 +1000,7 @@ func (rf *Raft) sendHeartBeatMsg(server int, term int) {
 }
 
 // majorityCommitIndex
-// find the N, that a majority of matchIndex[i] >= N
+// find the Nth log, which a majority of matchIndex[i] >= N and its term is leader's term
 func majorityCommitIndex(rf *Raft) int {
 	servers := rf.servers
 	arr := make([]int, servers)
@@ -1022,9 +1013,10 @@ func majorityCommitIndex(rf *Raft) int {
 	sort.Ints(arr)
 	index := rf.commitIndex
 	midCommit := arr[servers>>1]
-	// if leader replicates an entry from its current term on a majority of the servers before crashing
-	// then this entry is committed
 	// according to Figure 8
+	// the preceding logs may be overwritten by other leaders
+	// only if leader replicates an entry from its current term on a majority of the servers before crashing
+	// then all preceding logs are committed
 	for i = midCommit; i >= rf.commitIndex+1; i-- {
 		if rf.log[i-rf.lastIncludedIndex-1].Term == rf.currentTerm {
 			return i
