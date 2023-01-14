@@ -56,10 +56,6 @@ func logSnapshot(format string, v ...interface{}) {
 	}
 }
 
-const MaxLogsPerApply = 20
-
-const ApplyLogInterval = 20 * time.Millisecond
-
 // ApplyMsg
 // as each Raft peer becomes aware that successive log entries are committed,
 // the peer send an ApplyMsg to the service on the same server, via the applyCh.
@@ -107,14 +103,17 @@ type Raft struct {
 	lastIncludedIndex int        // persistent
 	lastIncludedTerm  int        // persistent
 
-	commitIndex      int             // index of the highest log entry known to be committed (initialized to 0)
-	lastApplied      int             // index of the highest log entry known to be applied to state machine (initialized to 0)
-	lastAppliedTerm  int             // term of lastApplied
-	role             string          // server role
-	applyCh          chan []ApplyMsg // for raft to send committed log and snapshot
-	electionTimeout  int64           // time to start a new election, milliseconds
-	minMajorityVotes int             // the minimum number of votes required to become a leader
-	servers          int             // number of raft servers in cluster
+	commitIndex      int    // index of the highest log entry known to be committed (initialized to 0)
+	lastApplied      int    // index of the highest log entry known to be applied to state machine (initialized to 0)
+	lastAppliedTerm  int    // term of lastApplied
+	role             string // server role
+	electionTimeout  int64  // time to start a new election, milliseconds
+	minMajorityVotes int    // the minimum number of votes required to become a leader
+	servers          int    // number of raft servers in cluster
+
+	applyCond *sync.Cond
+	applyMu   sync.Mutex      // lock for applyCh
+	applyCh   chan []ApplyMsg // for raft to send committed log and snapshot
 
 	// for snapshot
 	snapshot []byte // in-memory snapshot
@@ -137,6 +136,7 @@ var errNilStorage = errors.New("storage is nil")
 // me in the cluster shouldn't be duplicate but the order of raftAddresses can be random
 func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, applyCh chan []ApplyMsg) (*Raft, error) {
 	rf := &Raft{}
+	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.servers = len(raftAddresses) + 1
 	if rf.servers&1 == 0 {
 		return nil, &RuntimeError{Stage: "start raft", Err: errEvenRafts}
@@ -255,38 +255,37 @@ func (rf *Raft) recoverFrom(state []byte) error {
 // a goroutine to apply committed log
 func (rf *Raft) applyLog() {
 	for {
-		rf.mu.Lock()
-		lastApplied := rf.lastApplied
-		commitIndex := rf.commitIndex
-		if lastApplied < commitIndex {
-			startIndex := lastApplied + 1
-			endIndex := commitIndex
-			commandIndex := startIndex
-			count := endIndex - startIndex + 1
-			if count > MaxLogsPerApply {
-				count = MaxLogsPerApply
-			}
-			logs := make([]ApplyMsg, count)
-			// if lastIncludedIndex is -1, then i = lastApplied + 1
-			// otherwise, i = lastApplied + 1 - offset
-			i := startIndex - rf.lastIncludedIndex - 1
-			for j := 0; j < len(logs); j++ {
-				logs[j] = ApplyMsg{
-					CommandValid: true,
-					Command:      rf.log[i].Command,
-					CommandIndex: commandIndex,
-					CommandTerm:  rf.log[i].Term,
-				}
-				commandIndex++
-				i++
-			}
-			rf.applyCh <- logs
-			rf.lastApplied = commandIndex - 1
-			rf.lastAppliedTerm = logs[count-1].CommandTerm
-			rf.mu.Unlock()
+		rf.applyCond.L.Lock()
+		for rf.lastApplied >= rf.commitIndex {
+			rf.applyCond.Wait()
 		}
+		startIndex := rf.lastApplied + 1
+		endIndex := rf.commitIndex
+		commandIndex := startIndex
+		count := endIndex - startIndex + 1
+		// if lastIncludedIndex is -1, then i = lastApplied + 1
+		// otherwise, i = lastApplied + 1 - offset
+		i := startIndex - rf.lastIncludedIndex - 1
+		messages := make([]ApplyMsg, count)
+		logTerm := -1
+		for j := 0; j < count; j++ {
+			logTerm = rf.log[i].Term
+			messages[j] = ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: commandIndex,
+				CommandTerm:  logTerm,
+			}
+			commandIndex++
+			i++
+		}
+		rf.lastApplied = endIndex
+		rf.lastAppliedTerm = logTerm
 
-		time.Sleep(ApplyLogInterval)
+		rf.applyMu.Lock()
+		rf.applyCond.L.Unlock()
+		rf.applyCh <- messages
+		rf.applyMu.Unlock()
 	}
 }
 
@@ -385,47 +384,6 @@ func (rf *Raft) GetState() (int, bool) {
 	var isLeader = strings.Compare(rf.role, Leader) == 0
 
 	return term, isLeader
-}
-
-// CondInstallSnapshot
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// had more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.lastApplied > lastIncludedIndex {
-		logSnapshot("[%d] has applied entries after the snapshot's lastIncludedIndex!, lastApplied = %d, lastIncludedIndex = %d", rf.me, rf.lastApplied, lastIncludedIndex)
-		return false
-	}
-	if rf.lastAppliedTerm > lastIncludedTerm {
-		logSnapshot("[%d] has applied entries after the snapshot's lastIncludedTerm!, lastAppliedTerm = %d, lastIncludedTerm = %d", rf.me, rf.lastIncludedTerm, lastIncludedTerm)
-		return false
-	}
-	old := rf.lastIncludedIndex
-	reservedIndex := lastIncludedIndex - old
-	rf.snapshot = snapshot
-	rf.lastIncludedIndex = lastIncludedIndex
-	rf.lastIncludedTerm = lastIncludedTerm
-	rf.lastApplied = lastIncludedIndex
-	if reservedIndex >= len(rf.log) {
-		rf.log = []LogEntry{}
-	} else {
-		rf.log = rf.log[reservedIndex:]
-	}
-	state, err := rf.makeRaftState()
-
-	if err != nil {
-		e := &RuntimeError{Stage: "condinstallsnapshot", Err: err}
-		panic(e.Error())
-	}
-	err = rf.storage.SaveStateAndSnapshot(state, snapshot)
-	if err != nil {
-		e := &RuntimeError{Stage: "condinstallsnapshot", Err: err}
-		panic(e.Error())
-	}
-	logSnapshot("[%d] switch to new snapshot, lastIncludedIndex=%d, lastIncludedTerm=%d, log length=%d", rf.me, lastIncludedIndex, lastIncludedTerm, len(rf.log))
-	return true
 }
 
 // Snapshot is called when the service has created a snapshot that has
@@ -688,6 +646,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = maxLogIndex
 		}
 		logAppendEntry("[%d] update commitIndex to %d", rf.me, rf.commitIndex)
+		rf.applyCond.Signal()
 	}
 	reply.Success = true
 	rf.electionTimeout = randomElectionTimeout()
@@ -696,7 +655,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 
 	// reply false if term < currentTerm (§5.1)
@@ -721,19 +679,49 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		termChanged = true
 	}
 
-	if rf.lastIncludedIndex > args.LastIncludedIndex || args.LastIncludedTerm > args.LastIncludedTerm {
+	lastIncludedIndex := args.LastIncludedIndex
+	lastIncludedTerm := args.LastIncludedTerm
+	if rf.lastIncludedIndex >= lastIncludedIndex || rf.lastIncludedTerm > lastIncludedTerm ||
+		rf.lastApplied > lastIncludedIndex || rf.lastAppliedTerm > lastIncludedTerm {
+		rf.mu.Unlock()
 		return nil
 	}
-	logs := make([]ApplyMsg, 1)
-	logs[0] = ApplyMsg{
+
+	snapshot := args.Data
+	old := rf.lastIncludedIndex
+	reservedIndex := lastIncludedIndex - old
+	rf.snapshot = snapshot
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
+	rf.lastApplied = lastIncludedIndex
+	if reservedIndex >= len(rf.log) {
+		rf.log = []LogEntry{}
+	} else {
+		rf.log = rf.log[reservedIndex:]
+	}
+	state, err := rf.makeRaftState()
+	if err != nil {
+		e := &RuntimeError{Stage: "condinstallsnapshot", Err: err}
+		panic(e.Error())
+	}
+	err = rf.storage.SaveStateAndSnapshot(state, snapshot)
+	if err != nil {
+		e := &RuntimeError{Stage: "condinstallsnapshot", Err: err}
+		panic(e.Error())
+	}
+	messages := make([]ApplyMsg, 1)
+	messages[0] = ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
 		SnapshotIndex: args.LastIncludedIndex,
 		SnapshotTerm:  args.LastIncludedTerm,
 	}
 	logSnapshot("[%d] receive snapshot from %d, lastIncludedIndex=%d, lastIncludedTerm=%d", rf.me, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
-	rf.applyCh <- logs
 	rf.electionTimeout = randomElectionTimeout()
+	rf.applyMu.Lock()
+	rf.mu.Unlock()
+	rf.applyCh <- messages
+	rf.applyMu.Unlock()
 	return nil
 }
 
@@ -987,6 +975,7 @@ func (rf *Raft) sendHeartBeatMsg(server int, term int) {
 				if rf.commitIndex < index {
 					rf.commitIndex = index
 					logAppendEntry("[%d] has replicated log in index %d on majority servers, update commitIndex to %d", rf.me, index, index)
+					rf.applyCond.Signal()
 				}
 			} else {
 				rollbackIndex := backupIndex(reply, rf.log, args.PrevLogIndex, rf.lastIncludedIndex)
