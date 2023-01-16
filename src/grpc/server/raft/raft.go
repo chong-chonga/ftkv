@@ -111,9 +111,12 @@ type Raft struct {
 	minMajorityVotes int    // the minimum number of votes required to become a leader
 	servers          int    // number of raft servers in cluster
 
+	sendOrderCond *sync.Cond // condition for sendOrder
+	sendOrder     int64      // which order can send log/snapshot to applyCh
+	nextOrder     int64      // the next order a go routine will get
+
 	applyCond *sync.Cond
-	applyMu   sync.Mutex      // lock for applyCh
-	applyCh   chan []ApplyMsg // for raft to send committed log and snapshot
+	applyCh   chan ApplyMsg // for raft to send committed log and snapshot
 
 	// for snapshot
 	snapshot []byte // in-memory snapshot
@@ -134,9 +137,8 @@ var errNilStorage = errors.New("storage is nil")
 // raftAddresses are other raft's ip address
 // port specifies the raft server port
 // me in the cluster shouldn't be duplicate but the order of raftAddresses can be random
-func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, applyCh chan []ApplyMsg) (*Raft, error) {
+func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, applyCh chan ApplyMsg) (*Raft, error) {
 	rf := &Raft{}
-	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.servers = len(raftAddresses) + 1
 	if rf.servers&1 == 0 {
 		return nil, &RuntimeError{Stage: "start raft", Err: errEvenRafts}
@@ -147,18 +149,23 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	if storage == nil {
 		return nil, &RuntimeError{Stage: "start raft", Err: errNilStorage}
 	}
+
 	// init rpc clients
 	rf.peers = make([]*rpc.Peer, len(raftAddresses))
 	for i := 0; i < len(raftAddresses); i++ {
 		rf.peers[i] = rpc.MakePeer(raftAddresses[i])
 	}
+
 	rf.storage = storage
 	rf.me = me
 	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.sendOrder = 0
+	rf.nextOrder = 0
+	rf.sendOrderCond = sync.NewCond(&sync.Mutex{})
 
 	// initialize raft state according to Figure 2
 	rf.role = Follower
-
 	rf.minMajorityVotes = (rf.servers >> 1) + 1
 	rf.currentTerm = 0
 	rf.votedFor = -1
@@ -170,7 +177,6 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 		Command: nil,
 	}
 	rf.log = logEntries
-
 	// every server has a default log entry in index 0
 	// so index 0 is committed
 	rf.commitIndex = 0
@@ -199,9 +205,7 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	}()
 
 	// now is safe, start go routines
-	// start ticker goroutine to start elections
-	go rf.ticker()
-	// start apply goroutine to apply log
+	go rf.electionTicker()
 	go rf.applyLog()
 
 	return rf, nil
@@ -252,7 +256,7 @@ func (rf *Raft) recoverFrom(state []byte) error {
 }
 
 // applyLog
-// a goroutine to apply committed log
+// a go routine to send committed logs to applyCh
 func (rf *Raft) applyLog() {
 	for {
 		rf.applyCond.L.Lock()
@@ -261,12 +265,12 @@ func (rf *Raft) applyLog() {
 		}
 		startIndex := rf.lastApplied + 1
 		endIndex := rf.commitIndex
-		commandIndex := startIndex
 		count := endIndex - startIndex + 1
+		messages := make([]ApplyMsg, count)
 		// if lastIncludedIndex is -1, then i = lastApplied + 1
 		// otherwise, i = lastApplied + 1 - offset
 		i := startIndex - rf.lastIncludedIndex - 1
-		messages := make([]ApplyMsg, count)
+		commandIndex := startIndex
 		logTerm := -1
 		for j := 0; j < count; j++ {
 			logTerm = rf.log[i].Term
@@ -281,11 +285,20 @@ func (rf *Raft) applyLog() {
 		}
 		rf.lastApplied = endIndex
 		rf.lastAppliedTerm = logTerm
-
-		rf.applyMu.Lock()
+		order := rf.nextOrder
+		rf.nextOrder++
 		rf.applyCond.L.Unlock()
-		rf.applyCh <- messages
-		rf.applyMu.Unlock()
+
+		rf.sendOrderCond.L.Lock()
+		for rf.sendOrder != order {
+			rf.sendOrderCond.Wait()
+		}
+		for _, message := range messages {
+			rf.applyCh <- message
+		}
+		rf.sendOrder++
+		rf.sendOrderCond.Broadcast()
+		rf.sendOrderCond.L.Unlock()
 	}
 }
 
@@ -319,7 +332,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		err := rf.persist()
 		if err != nil {
-			panic(err)
+			panic(err.Error())
 		}
 		if rf.minMajorityVotes < 2 {
 			rf.commitIndex = index
@@ -579,43 +592,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return nil
 	}
 
-	// PrevLogIndex < totalLogLen，会有三种种情况
+	// 对于leader发送的 prevLogIndex 和follower的 lastIncludedIndex 有三种情况
 	// 1. PrevLogIndex > lastIncludedIndex
-	// 2. PrevLogIndex < lastIncludedIndex
-	// 3. PrevLogIndex == lastIncludedIndex
-	// 由于网络延迟等原因，会出现第2/3种情况；第二种情况中，我们无法比较这两个log的Term; 但是这种情况无需比较，因为Snapshot中的log都是committed，
+	// 2. PrevLogIndex < lastIncludedIndex（收到AppendEntries RPC 可能是过时的）
+	// 3. PrevLogIndex == lastIncludedIndex（收到AppendEntries RPC 可能是过时的）
+	// 第二种、三种情况，我们无需比较，因为Snapshot中的log都是committed，
 	// 根据Figure3的特性可知, leader 肯定包含有最新的 committed log，因此 leader 和 follower 至少会在 lastIncludedIndex 上有相同的 log
-	// prevLogIndex == -1 时，说明 leader 发送过来的 log 都是在 lastIncludedIndex 之后的, idx=0即可
-	// prevLogIndex < -1 时，则只比较在 lastIncludedIndex 之后的 log, idx 需要加上偏移量
+
 	idx := 0
 	i := 0
-	prevLogIndex := args.PrevLogIndex - rf.lastIncludedIndex - 1
-	if prevLogIndex < -1 {
-		idx -= prevLogIndex + 1
-	} else if prevLogIndex >= 0 {
+	//prevLogIndex := args.PrevLogIndex - rf.lastIncludedIndex - 1
+	offset := args.PrevLogIndex - rf.lastIncludedIndex
+	if offset > 0 {
+		/// offset > 0：需要比较第 offset 个 log 的 term，这里减1是为了弥补数组索引，lastIncludedIndex 初始化为 -1 也是如此
+		offset -= 1
 		// if term of log entry in prevLogIndex not match prevLogTerm
 		// set XTerm to term of the log
 		// set XIndex to the first entry in XTerm
 		// reply false (§5.3)
-		if rf.log[prevLogIndex].Term != args.PrevLogTerm {
-			reply.XTerm = rf.log[prevLogIndex].Term
-			for prevLogIndex > 0 {
-				if rf.log[prevLogIndex-1].Term != reply.XTerm {
+		if rf.log[offset].Term != args.PrevLogTerm {
+			reply.XTerm = rf.log[offset].Term
+			for offset > 0 {
+				if rf.log[offset-1].Term != reply.XTerm {
 					break
 				}
-				prevLogIndex--
+				offset--
 			}
-			reply.XIndex = prevLogIndex + rf.lastIncludedIndex + 1
+			reply.XIndex = offset + rf.lastIncludedIndex + 1
 			rf.electionTimeout = randomElectionTimeout()
 			return nil
 		}
 		// match, set i to prevLogIndex + 1, prepare for comparing the following logs
-		i = prevLogIndex + 1
+		i = offset + 1
+	} else {
+		// offset <= 0：说明log在snapshot中，则令idx加上偏移量，比较idx及其之后的log
+		idx -= offset
 	}
 
 	// If an existing entry conflicts with a new one (same index but different terms),
 	// delete the existing entry and all that follow it (§5.3)
-
 	for ; i < len(rf.log) && idx < len(args.Entries); i++ {
 		if rf.log[i].Term == args.Entries[idx].Term {
 			idx++
@@ -709,8 +724,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		e := &RuntimeError{Stage: "condinstallsnapshot", Err: err}
 		panic(e.Error())
 	}
-	messages := make([]ApplyMsg, 1)
-	messages[0] = ApplyMsg{
+	message := ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
 		SnapshotIndex: args.LastIncludedIndex,
@@ -718,11 +732,29 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	logSnapshot("[%d] receive snapshot from %d, lastIncludedIndex=%d, lastIncludedTerm=%d", rf.me, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
 	rf.electionTimeout = randomElectionTimeout()
-	rf.applyMu.Lock()
+	order := rf.nextOrder
+	rf.nextOrder++
 	rf.mu.Unlock()
-	rf.applyCh <- messages
-	rf.applyMu.Unlock()
+
+	go func(order int64) {
+		rf.sendOrderCond.L.Lock()
+		for rf.sendOrder != order {
+			rf.sendOrderCond.Wait()
+		}
+		rf.applyCh <- message
+		rf.sendOrder++
+		rf.sendOrderCond.Broadcast()
+		rf.sendOrderCond.L.Unlock()
+	}(order)
 	return nil
+}
+
+// CondInstallSnapshot
+// A service wants to switch to snapshot.  Only do so if Raft hasn't
+// had more recent info since it communicate the snapshot on applyCh.
+//
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	return true
 }
 
 func randomElectionTimeout() int64 {
@@ -741,7 +773,7 @@ func currentMilli() int64 {
 }
 
 // The ticker go routine starts a new election if this peer hasn't received heartbeat recently.
-func (rf *Raft) ticker() {
+func (rf *Raft) electionTicker() {
 	time.Sleep(1 * time.Second)
 	rf.electionTimeout = randomElectionTimeout()
 	for {
@@ -908,9 +940,11 @@ func (rf *Raft) sendHeartBeatMsg(server int, term int) {
 					if rf.role != Leader || rf.currentTerm != term {
 						return
 					}
+					// if an outdated reply is received, ignore it
 					if rf.nextIndex[server] > nextIndex || rf.matchIndex[server] > matchIndex {
 						return
 					}
+					// logs in snapshot are committed, no need to update commitIndex
 					rf.matchIndex[server] = args.LastIncludedIndex
 					rf.nextIndex[server] = args.LastIncludedIndex + 1
 				}
@@ -965,9 +999,11 @@ func (rf *Raft) sendHeartBeatMsg(server int, term int) {
 				return
 			}
 			if reply.Success {
+				// if an outdated reply is received, ignore it
 				if rf.nextIndex[server] > lastIndex {
 					return
 				}
+				// update nextIndex and matchIndex， then update commitIndex
 				rf.nextIndex[server] = lastIndex + 1
 				rf.matchIndex[server] = lastIndex
 				logAppendEntry("[%d] receive success append reply from %d, last append index is %d", rf.me, server, lastIndex)
@@ -994,6 +1030,7 @@ func majorityCommitIndex(rf *Raft) int {
 	servers := rf.servers
 	arr := make([]int, servers)
 	i := 0
+
 	for i < servers-1 {
 		arr[i] = rf.matchIndex[i]
 		i++
