@@ -277,10 +277,6 @@ func (kv *KVServer) makeSnapshot() ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("encode uniqueId fails: " + err.Error())
 	}
-	err = e.Encode(kv.commitIndex)
-	if err != nil {
-		return nil, errors.New("encode commitIndex fails: " + err.Error())
-	}
 	err = e.Encode(kv.tab)
 	if err != nil {
 		return nil, errors.New("encode tab fails: " + err.Error())
@@ -297,14 +293,11 @@ func (kv *KVServer) recoverFrom(snapshot []byte) {
 	d := safegob.NewDecoder(r)
 	var tab map[string]string
 	var nextClientId int64
-	var commitIndex int
 	if d.Decode(&nextClientId) != nil ||
-		d.Decode(&commitIndex) != nil ||
 		d.Decode(&tab) != nil {
 		log.Fatalf("[%d] decode snapshot failed!", kv.me)
 	}
 	kv.uniqueId = nextClientId
-	kv.commitIndex = commitIndex
 	kv.tab = tab
 	log3B("[%d] read from snapshot success!", kv.me)
 }
@@ -367,12 +360,8 @@ func (kv *KVServer) startApply() {
 			}
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
-			snapshot := msg.Snapshot
-			lastIncludedIndex := msg.SnapshotIndex
-			lastIncludedTerm := msg.SnapshotTerm
-			if kv.rf.CondInstallSnapshot(lastIncludedTerm, lastIncludedIndex, snapshot) {
-				kv.recoverFrom(snapshot)
-			}
+			kv.recoverFrom(msg.Snapshot)
+			kv.commitIndex = msg.SnapshotIndex
 		} else {
 			log.Println(kv.me, "receive unknown type log, content:", msg)
 		}
