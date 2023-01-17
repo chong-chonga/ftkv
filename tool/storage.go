@@ -5,7 +5,6 @@ import (
 	"github.com/pkg/errors"
 	"io"
 	"io/fs"
-	"log"
 	"os"
 	"runtime"
 	"strconv"
@@ -27,14 +26,6 @@ import (
 // snapshot(bytes) -- snapshot of service
 //
 const fileHeader = "RAFT"
-
-const LogEnabled = true
-
-func logInfo(v ...any) {
-	if LogEnabled {
-		log.Println(v...)
-	}
-}
 
 // Storage is not thread safe
 type Storage struct {
@@ -149,7 +140,7 @@ func (ps *Storage) SaveRaftState(state []byte) error {
 func (ps *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
 	tmpFile, err := os.CreateTemp("", "raft*.rfs")
 	if err != nil {
-		return &StorageError{Op: "save", Target: "snapshot", Err: err}
+		return &StorageError{Op: "save", Target: "raft state and snapshot", Err: err}
 	}
 	writer := newErrWriter(tmpFile)
 	writer.writeString(fileHeader)
@@ -157,7 +148,7 @@ func (ps *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
 	ps.writeSnapshot(writer, snapshot)
 	err = writer.atomicOverwrite(ps.snapshotPath)
 	if err != nil {
-		return &StorageError{Op: "save", Target: "snapshot", Err: err}
+		return &StorageError{Op: "save", Target: "raft state and snapshot", Err: err}
 	}
 	return nil
 }

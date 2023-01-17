@@ -21,6 +21,7 @@ var checked map[reflect.Type]bool
 
 type LabEncoder struct {
 	gob *gob.Encoder
+	e   error
 }
 
 func NewEncoder(w io.Writer) *LabEncoder {
@@ -29,9 +30,13 @@ func NewEncoder(w io.Writer) *LabEncoder {
 	return enc
 }
 
-func (enc *LabEncoder) Encode(e interface{}) error {
+func (enc *LabEncoder) Error() error {
+	return enc.e
+}
+
+func (enc *LabEncoder) Encode(e interface{}) {
 	checkValue(e)
-	return enc.gob.Encode(e)
+	enc.e = enc.gob.Encode(e)
 }
 
 func (enc *LabEncoder) EncodeValue(value reflect.Value) error {

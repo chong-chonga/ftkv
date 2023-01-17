@@ -5,6 +5,7 @@ import (
 	"net/rpc"
 )
 
+// Peer is a rpc client using the go library
 type Peer struct {
 	addr      string      // peer's address
 	rpcClient *rpc.Client // client for rpc call

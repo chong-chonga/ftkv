@@ -22,7 +22,6 @@ const _ = grpc.SupportPackageIsVersion7
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type KVServerClient interface {
-	ClearSession(ctx context.Context, in *ClearSessionRequest, opts ...grpc.CallOption) (*ClearSessionReply, error)
 	OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionReply, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetReply, error)
 	Update(ctx context.Context, in *UpdateRequest, opts ...grpc.CallOption) (*UpdateReply, error)
@@ -34,15 +33,6 @@ type kVServerClient struct {
 
 func NewKVServerClient(cc grpc.ClientConnInterface) KVServerClient {
 	return &kVServerClient{cc}
-}
-
-func (c *kVServerClient) ClearSession(ctx context.Context, in *ClearSessionRequest, opts ...grpc.CallOption) (*ClearSessionReply, error) {
-	out := new(ClearSessionReply)
-	err := c.cc.Invoke(ctx, "/KVServer/ClearSession", in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 func (c *kVServerClient) OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*OpenSessionReply, error) {
@@ -76,7 +66,6 @@ func (c *kVServerClient) Update(ctx context.Context, in *UpdateRequest, opts ...
 // All implementations must embed UnimplementedKVServerServer
 // for forward compatibility
 type KVServerServer interface {
-	ClearSession(context.Context, *ClearSessionRequest) (*ClearSessionReply, error)
 	OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionReply, error)
 	Get(context.Context, *GetRequest) (*GetReply, error)
 	Update(context.Context, *UpdateRequest) (*UpdateReply, error)
@@ -87,9 +76,6 @@ type KVServerServer interface {
 type UnimplementedKVServerServer struct {
 }
 
-func (UnimplementedKVServerServer) ClearSession(context.Context, *ClearSessionRequest) (*ClearSessionReply, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ClearSession not implemented")
-}
 func (UnimplementedKVServerServer) OpenSession(context.Context, *OpenSessionRequest) (*OpenSessionReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method OpenSession not implemented")
 }
@@ -110,24 +96,6 @@ type UnsafeKVServerServer interface {
 
 func RegisterKVServerServer(s grpc.ServiceRegistrar, srv KVServerServer) {
 	s.RegisterService(&KVServer_ServiceDesc, srv)
-}
-
-func _KVServer_ClearSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ClearSessionRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(KVServerServer).ClearSession(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: "/KVServer/ClearSession",
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(KVServerServer).ClearSession(ctx, req.(*ClearSessionRequest))
-	}
-	return interceptor(ctx, in, info, handler)
 }
 
 func _KVServer_OpenSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -191,10 +159,6 @@ var KVServer_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "KVServer",
 	HandlerType: (*KVServerServer)(nil),
 	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "ClearSession",
-			Handler:    _KVServer_ClearSession_Handler,
-		},
 		{
 			MethodName: "OpenSession",
 			Handler:    _KVServer_OpenSession_Handler,

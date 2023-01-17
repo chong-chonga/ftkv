@@ -7,10 +7,10 @@ import (
 	"errors"
 	uuid "github.com/satori/go.uuid"
 	"google.golang.org/grpc"
-	pb "kvraft/src/grpc/server/proto"
-	"kvraft/src/grpc/server/raft"
-	"kvraft/src/safegob"
-	"kvraft/src/tool"
+	"kvraft/proto"
+	"kvraft/raft"
+	"kvraft/safegob"
+	"kvraft/tool"
 	"log"
 	"net"
 	"strconv"
@@ -29,12 +29,12 @@ const SessionTimeout = 1 * time.Hour
 const DefaultMaxRaftState = 30
 
 const (
-	OpenSession pb.Op = -2
-	GET         pb.Op = -3
+	OpenSession kvserver.Op = -2
+	GET         kvserver.Op = -3
 )
 
 type Op struct {
-	OpType pb.Op
+	OpType kvserver.Op
 	Key    string
 	Value  string
 	UUID   string
@@ -46,7 +46,7 @@ type ApplyResult struct {
 }
 
 type KVServer struct {
-	pb.UnimplementedKVServerServer
+	kvserver.kvserver
 	mu            sync.Mutex // big lock
 	me            int
 	maxRaftState  int
@@ -109,7 +109,7 @@ func StartKVServer(serverAddress []string, raftAddresses []string, me int, port 
 	// start grpc server
 	listener, _ := net.Listen("tcp", serverAddress[me])
 	server := grpc.NewServer()
-	pb.RegisterKVServerServer(server, kv)
+	kvserver.RegisterKVServerServer(server, kv)
 	go func() {
 		_ = server.Serve(listener)
 	}()
@@ -134,12 +134,12 @@ func logSession(format string, v ...interface{}) {
 	}
 }
 
-func (kv *KVServer) OpenSession(_ context.Context, request *pb.OpenSessionRequest) (*pb.OpenSessionReply, error) {
-	reply := &pb.OpenSessionReply{}
+func (kv *KVServer) OpenSession(_ context.Context, request *kvserver.OpenSessionRequest) (*kvserver.OpenSessionReply, error) {
+	reply := &kvserver.OpenSessionReply{}
 	logSession("[%d] receive OpenSession request from client", kv.me)
 	reply.SessionId = ""
 	if request.GetPassword() != kv.password {
-		reply.ErrCode = pb.ErrCode_INVALID_PASSWORD
+		reply.ErrCode = kvserver.ErrCode_INVALID_PASSWORD
 		return reply, nil
 	}
 	command := Op{
@@ -149,25 +149,25 @@ func (kv *KVServer) OpenSession(_ context.Context, request *pb.OpenSessionReques
 		UUID:   uuid.NewV4().String(),
 	}
 	applyResult, errCode := kv.submit(command)
-	if errCode == pb.ErrCode_OK {
+	if errCode == kvserver.ErrCode_OK {
 		reply.SessionId = applyResult.SessionId
-		reply.ErrCode = pb.ErrCode_OK
+		reply.ErrCode = kvserver.ErrCode_OK
 	} else {
 		reply.ErrCode = errCode
 	}
 	return reply, nil
 }
 
-func (kv *KVServer) Get(_ context.Context, args *pb.GetRequest) (*pb.GetReply, error) {
-	reply := &pb.GetReply{}
+func (kv *KVServer) Get(_ context.Context, args *kvserver.GetRequest) (*kvserver.GetReply, error) {
+	reply := &kvserver.GetReply{}
 	log3A("[%d] receive get request from client, sessionId=%s", kv.me, args.SessionId)
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
-		reply.ErrCode = pb.ErrCode_WRONG_LEADER
+		reply.ErrCode = kvserver.ErrCode_WRONG_LEADER
 		return reply, nil
 	}
 	if !kv.isSessionValid(args.SessionId) {
-		reply.ErrCode = pb.ErrCode_INVALID_SESSION
+		reply.ErrCode = kvserver.ErrCode_INVALID_SESSION
 		return reply, nil
 	}
 	command := Op{
@@ -179,13 +179,13 @@ func (kv *KVServer) Get(_ context.Context, args *pb.GetRequest) (*pb.GetReply, e
 	// start时，不应当持有锁，因为这会阻塞 KVServer 接收来自 raft 的 log
 	// start的命令的返回值的唯一性已经由 raft 的互斥锁保证
 	_, errCode := kv.submit(command)
-	if errCode == pb.ErrCode_OK {
+	if errCode == kvserver.ErrCode_OK {
 		kv.mu.Lock()
 		if v, exist := kv.tab[args.Key]; !exist {
-			reply.ErrCode = pb.ErrCode_NO_KEY
+			reply.ErrCode = kvserver.ErrCode_NO_KEY
 			reply.Value = ""
 		} else {
-			reply.ErrCode = pb.ErrCode_OK
+			reply.ErrCode = kvserver.ErrCode_OK
 			reply.Value = v
 		}
 		kv.mu.Unlock()
@@ -196,22 +196,22 @@ func (kv *KVServer) Get(_ context.Context, args *pb.GetRequest) (*pb.GetReply, e
 	return reply, nil
 }
 
-func (kv *KVServer) Update(_ context.Context, args *pb.UpdateRequest) (*pb.UpdateReply, error) {
-	reply := &pb.UpdateReply{}
+func (kv *KVServer) Update(_ context.Context, args *kvserver.UpdateRequest) (*kvserver.UpdateReply, error) {
+	reply := &kvserver.UpdateReply{}
 	log3A("[%d] receive %v request from client, sessionId=%s", kv.me, args.Op, args.SessionId)
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
-		reply.ErrCode = pb.ErrCode_WRONG_LEADER
+		reply.ErrCode = kvserver.ErrCode_WRONG_LEADER
 		return reply, nil
 	}
 	if !kv.isSessionValid(args.SessionId) {
-		reply.ErrCode = pb.ErrCode_INVALID_SESSION
+		reply.ErrCode = kvserver.ErrCode_INVALID_SESSION
 		return reply, nil
 	}
 
 	op := args.Op
-	if op != pb.Op_PUT && op != pb.Op_APPEND && op != pb.Op_DELETE {
-		reply.ErrCode = pb.ErrCode_INVALID_OP
+	if op != kvserver.Op_PUT && op != kvserver.Op_APPEND && op != kvserver.Op_DELETE {
+		reply.ErrCode = kvserver.ErrCode_INVALID_OP
 		return reply, nil
 	}
 	command := Op{
@@ -241,10 +241,10 @@ func (kv *KVServer) isSessionValid(sessionId string) bool {
 // If the submitted command reaches consensus successfully, the pointer points to the corresponding ApplyResult will be returned;
 // and the pb.ErrCode is pb.ErrCode_OK
 // otherwise, the returned *ApplyResult would be nil and the ErrCode indicating the reason why the command fails to complete
-func (kv *KVServer) submit(op Op) (*ApplyResult, pb.ErrCode) {
+func (kv *KVServer) submit(op Op) (*ApplyResult, kvserver.ErrCode) {
 	commandIndex, commandTerm, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		return nil, pb.ErrCode_WRONG_LEADER
+		return nil, kvserver.ErrCode_WRONG_LEADER
 	}
 	// leader1(current leader) may be partitioned by itself,
 	// its log may be trimmed by leader2 (if and only if leader2's term > leader1's term)
@@ -264,9 +264,9 @@ func (kv *KVServer) submit(op Op) (*ApplyResult, pb.ErrCode) {
 	res := <-ch
 	// log's index and term identifies the unique log
 	if res.Term == commandTerm {
-		return &res, pb.ErrCode_OK
+		return &res, kvserver.ErrCode_OK
 	} else {
-		return nil, pb.ErrCode_WRONG_LEADER
+		return nil, kvserver.ErrCode_WRONG_LEADER
 	}
 }
 
@@ -326,15 +326,15 @@ func (kv *KVServer) startApply() {
 				kv.uniqueId++
 				logSession("[%d] open a new session, sessionId=%s", kv.me, result.SessionId)
 			} else {
-				if pb.Op_PUT == commandType {
+				if kvserver.Op_PUT == commandType {
 					kv.tab[op.Key] = op.Value
 					log3A("[%d] execute put %s on key=%v, sessionId=%s", kv.me, op.Value, op.Key, result.SessionId)
-				} else if pb.Op_APPEND == commandType {
+				} else if kvserver.Op_APPEND == commandType {
 					v := kv.tab[op.Key]
 					v += op.Value
 					kv.tab[op.Key] = v
 					log3A("[%d] execute append %s on key=%v, now value is %s, sessionId=%s", kv.me, op.Value, op.Key, v, result.SessionId)
-				} else if pb.Op_DELETE == commandType {
+				} else if kvserver.Op_DELETE == commandType {
 					delete(kv.tab, op.Key)
 					log3A("[%d execute delete on key=%v, sessionId=%s", kv.me, op.Key, result.SessionId)
 				} else if GET != commandType {

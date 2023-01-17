@@ -3,7 +3,6 @@ syntax = "proto3";
 option go_package = ".;kvserver";
 
 service KVServer {
-    rpc ClearSession (ClearSessionRequest) returns (ClearSessionReply);
     rpc OpenSession (OpenSessionRequest) returns (OpenSessionReply);
     rpc Get (GetRequest) returns (GetReply);
     rpc Update (UpdateRequest) returns (UpdateReply);
@@ -15,7 +14,7 @@ enum ErrCode {
     NO_KEY = 2;
     INVALID_SESSION = 3;
     INVALID_OP = 4;
-    INVALID_TOKEN = 5;
+    INVALID_PASSWORD = 5;
 }
 
 enum Op {
@@ -24,20 +23,12 @@ enum Op {
     DELETE = 2;
 }
 
-message ClearSessionRequest {
-    string token = 1;
-}
-
-message ClearSessionReply {
-    ErrCode err_code = 1;
-}
-
 message OpenSessionRequest {
-
+    string password = 1;
 }
 
 message OpenSessionReply {
-    int64 client_id = 1;
+    string session_id = 1;
     ErrCode err_code = 2;
 }
 
@@ -45,8 +36,7 @@ message UpdateRequest {
     string key = 1;
     string value = 2;
     Op op = 3;               // "Put" or "Append" or "Delete"
-    int64 client_id = 4;     // client id
-    int64 request_id = 5;    // client request id (increase monotonically)
+    string session_id = 4;
 }
 
 message UpdateReply {
@@ -55,12 +45,11 @@ message UpdateReply {
 
 message GetRequest {
     string key = 1;
-    int64 client_id = 2;   // client id
-    int64 request_id = 3;  // client request id (increase monotonically)
+    string session_id = 2;
 }
 
 message GetReply {
-    string value = 2;
-    ErrCode err_code = 1;
+    string value = 1;
+    ErrCode err_code = 2;
 }
 
