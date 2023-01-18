@@ -23,15 +23,22 @@ import (
 // stateVersion -- version of raft state
 // stateSize -- size of raft state
 // state(bytes) -- raft state
+// snapshotSize -- size of snapshot
 // snapshot(bytes) -- snapshot of service
+// .rf file format
+// RAFT -- file header
+// stateVersion -- version of raft state
+// stateSize -- size of raft state
+// state(bytes) -- raft state
 //
 const fileHeader = "RAFT"
 
 // Storage is not thread safe
 type Storage struct {
-	nextRaftStateVersion int64
+	initialized          bool
 	raftState            []byte
 	snapshot             []byte
+	nextRaftStateVersion int64
 	raftStatePath        string
 	snapshotPath         string
 }
@@ -74,9 +81,10 @@ func (ew *errWriter) writeString(s string) {
 // atomicOverwrite write the buffered data to disk and overwrite the file corresponding to the path
 func (ew *errWriter) atomicOverwrite(path string) error {
 	err := ew.e
-	if err == nil {
-		err = ew.wr.Flush()
+	if err != nil {
+		return err
 	}
+	err = ew.wr.Flush()
 	if err != nil {
 		return err
 	}
@@ -84,10 +92,8 @@ func (ew *errWriter) atomicOverwrite(path string) error {
 	if err != nil {
 		return err
 	}
-	err = ew.file.Close()
-	if err != nil {
-		return err
-	}
+	// close will return an error if it has already been called, ignore
+	_ = ew.file.Close()
 	err = os.Rename(ew.file.Name(), path)
 	if err != nil {
 		// deletion failure will not affect, just ignore
@@ -106,18 +112,17 @@ func MakeStorage(serverNum int) (*Storage, error) {
 	}
 	s.raftStatePath = raftStatePath
 	s.snapshotPath = snapshotPath
-	raftState, raftStateVersion, snapshot, err := s.initRead()
+	err := s.initRead()
 	if err != nil {
 		return nil, err
 	}
-	s.raftState = raftState
-	s.snapshot = snapshot
-	if raftStateVersion > 0 {
-		s.nextRaftStateVersion = raftStateVersion + 1
-	} else {
-		s.nextRaftStateVersion = 1
-	}
 	return s, nil
+}
+
+func clone(data []byte) []byte {
+	d := make([]byte, len(data))
+	copy(d, data)
+	return d
 }
 
 func (ps *Storage) SaveRaftState(state []byte) error {
@@ -132,6 +137,7 @@ func (ps *Storage) SaveRaftState(state []byte) error {
 	if err != nil {
 		return &StorageError{Op: "save", Target: "raft state", Err: err}
 	}
+	ps.raftState = clone(state)
 	return nil
 }
 
@@ -150,6 +156,8 @@ func (ps *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
 	if err != nil {
 		return &StorageError{Op: "save", Target: "raft state and snapshot", Err: err}
 	}
+	ps.raftState = clone(state)
+	ps.snapshot = clone(snapshot)
 	return nil
 }
 
@@ -157,7 +165,7 @@ func (ps *Storage) writeRaftState(writer *errWriter, state []byte) {
 	writer.writeString(strconv.FormatInt(ps.nextRaftStateVersion, 10) + "\t")
 	raftStateSize := len(state)
 	writer.writeString(strconv.Itoa(raftStateSize) + "\t")
-	if raftStateSize != 0 {
+	if raftStateSize > 0 {
 		writer.write(state)
 	}
 	ps.nextRaftStateVersion++
@@ -166,7 +174,7 @@ func (ps *Storage) writeRaftState(writer *errWriter, state []byte) {
 func (ps *Storage) writeSnapshot(writer *errWriter, snapshot []byte) {
 	snapshotSize := len(snapshot)
 	writer.writeString(strconv.Itoa(snapshotSize) + "\t")
-	if snapshotSize != 0 {
+	if snapshotSize > 0 {
 		writer.write(snapshot)
 	}
 }
@@ -179,7 +187,7 @@ func (ps *Storage) ReadSnapshot() []byte {
 	return ps.snapshot
 }
 
-func (ps *Storage) initRead() ([]byte, int64, []byte, error) {
+func (ps *Storage) initRead() error {
 	var raftState1 []byte
 	var raftState2 []byte
 	var snapshot []byte
@@ -188,21 +196,26 @@ func (ps *Storage) initRead() ([]byte, int64, []byte, error) {
 	var err error
 	raftState1, version1, err = ps.readRF()
 	if err != nil {
-		return nil, -1, nil, err
+		return err
 	}
 	raftState2, version2, snapshot, err = ps.readRFS()
 	if err != nil {
-		return nil, -1, nil, err
+		return err
 	}
 	if version1 > version2 {
-		return raftState1, version1, snapshot, nil
+		ps.nextRaftStateVersion = version1 + 1
+		ps.raftState = raftState1
+	} else {
+		ps.nextRaftStateVersion = version2 + 1
+		ps.raftState = raftState2
 	}
-	return raftState2, version2, snapshot, nil
+	ps.snapshot = snapshot
+	return nil
 }
 
 func (ps *Storage) readRF() ([]byte, int64, error) {
 	var raftState []byte
-	var version int64 = -1
+	var version int64 = 0
 	file, err := openIfExists(ps.raftStatePath)
 	if err != nil {
 		return nil, -1, &StorageError{Op: "read", Target: ps.raftStatePath, Err: err}
@@ -225,7 +238,7 @@ func (ps *Storage) readRF() ([]byte, int64, error) {
 
 func (ps *Storage) readRFS() ([]byte, int64, []byte, error) {
 	var raftState []byte
-	var version int64 = -1
+	var version int64 = 0
 	var snapshot []byte
 	file, err := openIfExists(ps.snapshotPath)
 	if err != nil {
