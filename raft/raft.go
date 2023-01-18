@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"errors"
+	"kvraft/kvserver"
 	"kvraft/rpc"
 	"kvraft/safegob"
 	"kvraft/tool"
@@ -80,15 +81,6 @@ type LogEntry struct {
 	Command interface{}
 }
 
-type RuntimeError struct {
-	Stage string
-	Err   error
-}
-
-func (re *RuntimeError) Error() string {
-	return re.Stage + ": " + re.Err.Error()
-}
-
 // Raft
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -127,12 +119,6 @@ type Raft struct {
 	heartbeatSent []int64 // time of last sent heartbeat for other servers (millisecond)
 }
 
-var errEvenRafts = errors.New("even number of rafts")
-
-var errInvalidPort = errors.New("port is invalid")
-
-var errNilStorage = errors.New("storage is nil")
-
 // StartRaft start raft server for service
 // raftAddresses are other raft's ip address
 // port specifies the raft server port
@@ -141,13 +127,13 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	rf := &Raft{}
 	rf.servers = len(raftAddresses) + 1
 	if rf.servers&1 == 0 {
-		return nil, &RuntimeError{Stage: "start raft", Err: errEvenRafts}
+		return nil, &kvserver.RuntimeError{Stage: "start raft", Err: kvserver.ErrEvenServers}
 	}
 	if port <= 0 {
-		return nil, &RuntimeError{Stage: "start raft", Err: errInvalidPort}
+		return nil, &kvserver.RuntimeError{Stage: "start raft", Err: kvserver.ErrInvalidPort}
 	}
 	if storage == nil {
-		return nil, &RuntimeError{Stage: "start raft", Err: errNilStorage}
+		return nil, &kvserver.RuntimeError{Stage: "start raft", Err: kvserver.ErrNilStorage}
 	}
 
 	// init rpc clients
@@ -182,13 +168,13 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.lastAppliedTerm = 0
+	if rf.minMajorityVotes < 2 {
+		rf.commitIndex = rf.lastIncludedIndex + len(rf.log)
+	}
 	// initialize from persisted state
 	err := rf.recoverFrom(storage.ReadRaftState())
 	if err != nil {
-		return nil, &RuntimeError{Stage: "start raft", Err: err}
-	}
-	if rf.minMajorityVotes < 2 {
-		rf.commitIndex = rf.lastIncludedIndex + len(rf.log)
+		return nil, &kvserver.RuntimeError{Stage: "start raft", Err: err}
 	}
 	rf.snapshot = storage.ReadSnapshot()
 
@@ -196,7 +182,7 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	server := rpc2.NewServer()
 	err = server.Register(rf)
 	if err != nil {
-		return nil, &RuntimeError{Stage: "start raft", Err: err}
+		return nil, &kvserver.RuntimeError{Stage: "start raft", Err: err}
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", server)
@@ -226,19 +212,19 @@ func (rf *Raft) recoverFrom(state []byte) error {
 	var lastIncludedTerm int
 	var err error
 	if err = d.Decode(&currentTerm); err != nil {
-		return errors.New("decode currentTerm fails: " + err.Error())
+		return errors.New("recover from state: decode currentTerm fails: " + err.Error())
 	}
 	if err = d.Decode(&votedFor); err != nil {
-		return errors.New("decode votedFor fails: " + err.Error())
+		return errors.New("recover from state: decode votedFor fails: " + err.Error())
 	}
 	if err = d.Decode(&lastIncludedIndex); err != nil {
-		return errors.New("decode lastIncludedIndex fails: " + err.Error())
+		return errors.New("recover from state: decode lastIncludedIndex fails: " + err.Error())
 	}
 	if err = d.Decode(&lastIncludedTerm); err != nil {
-		return errors.New("decode lastIncludedTerm fails: " + err.Error())
+		return errors.New("recover from state: decode lastIncludedTerm fails: " + err.Error())
 	}
 	if err = d.Decode(&logEntries); err != nil {
-		return errors.New("decode logEntries fails: " + err.Error())
+		return errors.New("recover from state: decode logEntries fails: " + err.Error())
 	}
 
 	rf.currentTerm = currentTerm
@@ -379,11 +365,11 @@ func (rf *Raft) makeRaftState() ([]byte, error) {
 func (rf *Raft) persist() error {
 	state, err := rf.makeRaftState()
 	if err != nil {
-		return &RuntimeError{Stage: "persist", Err: err}
+		return &kvserver.RuntimeError{Stage: "persist", Err: err}
 	}
 	err = rf.storage.SaveRaftState(state)
 	if err != nil {
-		return &RuntimeError{Stage: "persist", Err: err}
+		return &kvserver.RuntimeError{Stage: "persist", Err: err}
 	}
 	logPersistence("[%d] persist raft state success!", rf.me)
 	return nil
@@ -421,12 +407,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}
 	state, err := rf.makeRaftState()
 	if err != nil {
-		e := &RuntimeError{Stage: "snapshot", Err: err}
+		e := &kvserver.RuntimeError{Stage: "snapshot", Err: err}
 		panic(e.Error())
 	}
 	err = rf.storage.SaveStateAndSnapshot(state, snapshot)
 	if err != nil {
-		e := &RuntimeError{Stage: "snapshot", Err: err}
+		e := &kvserver.RuntimeError{Stage: "snapshot", Err: err}
 		panic(e.Error())
 	}
 	logSnapshot("{%d] make a new snapshot, oldLastIncludedIndex=%d, newLastIncludedIndex=%d, trim log after %d", rf.me, old, index, discardedLogIndex)
@@ -716,12 +702,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	state, err := rf.makeRaftState()
 	if err != nil {
-		e := &RuntimeError{Stage: "condinstallsnapshot", Err: err}
+		e := &kvserver.RuntimeError{Stage: "condinstallsnapshot", Err: err}
 		panic(e.Error())
 	}
 	err = rf.storage.SaveStateAndSnapshot(state, snapshot)
 	if err != nil {
-		e := &RuntimeError{Stage: "condinstallsnapshot", Err: err}
+		e := &kvserver.RuntimeError{Stage: "condinstallsnapshot", Err: err}
 		panic(e.Error())
 	}
 	message := ApplyMsg{
