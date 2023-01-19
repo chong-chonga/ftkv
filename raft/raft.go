@@ -5,13 +5,12 @@ import (
 	"encoding/gob"
 	"errors"
 	"kvraft/kvserver"
-	"kvraft/rpc"
 	"kvraft/safegob"
 	"kvraft/tool"
 	"log"
 	"math/rand"
 	"net/http"
-	rpc2 "net/rpc"
+	"net/rpc"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,8 +84,8 @@ type LogEntry struct {
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu      sync.Mutex    // Lock to protect shared access to this peer's state
-	peers   []*rpc.Peer   // RPC end points of all peers
-	storage *tool.Storage // Object to hold this peer's persisted state
+	peers   []*tool.Peer  // RPC clients of all peers
+	storage *tool.Storage // tool for persistence
 	me      int           // this peer's index into peers[]
 
 	currentTerm       int        // persistent, the latest term server has seen (initialized to 0 on first boot, increases monotonically)
@@ -111,7 +110,7 @@ type Raft struct {
 	applyCh   chan ApplyMsg // for raft to send committed log and snapshot
 
 	// for snapshot
-	snapshot []byte // in-memory snapshot
+	//snapshot []byte // in-memory snapshot
 
 	// leader state
 	nextIndex     []int   // index of the next log entry send to the other servers (initialized to 1 for each)
@@ -137,9 +136,9 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	}
 
 	// init rpc clients
-	rf.peers = make([]*rpc.Peer, len(raftAddresses))
+	rf.peers = make([]*tool.Peer, len(raftAddresses))
 	for i := 0; i < len(raftAddresses); i++ {
-		rf.peers[i] = rpc.MakePeer(raftAddresses[i])
+		rf.peers[i] = tool.MakePeer(raftAddresses[i])
 	}
 
 	rf.storage = storage
@@ -176,10 +175,8 @@ func StartRaft(raftAddresses []string, me int, port int, storage *tool.Storage, 
 	if err != nil {
 		return nil, &kvserver.RuntimeError{Stage: "start raft", Err: err}
 	}
-	rf.snapshot = storage.ReadSnapshot()
-
 	// start go rpc server
-	server := rpc2.NewServer()
+	server := rpc.NewServer()
 	err = server.Register(rf)
 	if err != nil {
 		return nil, &kvserver.RuntimeError{Stage: "start raft", Err: err}
@@ -397,14 +394,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		return
 	}
 	discardedLogIndex := index - old - 1
-	rf.snapshot = snapshot
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = rf.log[discardedLogIndex].Term
-	if discardedLogIndex+1 >= len(rf.log) {
-		rf.log = []LogEntry{}
-	} else {
-		rf.log = rf.log[discardedLogIndex+1:]
+	var logs []LogEntry
+	for i := discardedLogIndex + 1; i < len(rf.log); i++ {
+		logs = append(logs, rf.log[i])
 	}
+	rf.log = logs
 	state, err := rf.makeRaftState()
 	if err != nil {
 		e := &kvserver.RuntimeError{Stage: "snapshot", Err: err}
@@ -622,7 +618,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			idx++
 			continue
 		}
-		rf.log = rf.log[0:i]
+		var logs []LogEntry
+		for j := 0; j < i; j++ {
+			logs = append(logs, rf.log[j])
+		}
+		rf.log = logs
 		logAppendEntry("[%d] exists conflict entry in index %d, delete the entry and all after that", rf.me, i)
 		truncated = true
 		break
@@ -691,15 +691,14 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	snapshot := args.Data
 	old := rf.lastIncludedIndex
 	reservedIndex := lastIncludedIndex - old
-	rf.snapshot = snapshot
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.lastApplied = lastIncludedIndex
-	if reservedIndex >= len(rf.log) {
-		rf.log = []LogEntry{}
-	} else {
-		rf.log = rf.log[reservedIndex:]
+	var logs []LogEntry
+	for i := reservedIndex; i < len(rf.log); i++ {
+		logs = append(logs, rf.log[i])
 	}
+	rf.log = logs
 	state, err := rf.makeRaftState()
 	if err != nil {
 		e := &kvserver.RuntimeError{Stage: "condinstallsnapshot", Err: err}
@@ -733,14 +732,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.sendOrderCond.L.Unlock()
 	}(order)
 	return nil
-}
-
-// CondInstallSnapshot
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// had more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-	return true
 }
 
 func randomElectionTimeout() int64 {
@@ -901,7 +892,7 @@ func (rf *Raft) sendHeartBeatMsg(server int, term int) {
 				LeaderId:          rf.me,
 				LastIncludedIndex: rf.lastIncludedIndex,
 				LastIncludedTerm:  rf.lastIncludedTerm,
-				Data:              rf.snapshot,
+				Data:              rf.storage.ReadSnapshot(),
 			}
 			matchIndex := rf.matchIndex[server]
 			rf.mu.Unlock()
