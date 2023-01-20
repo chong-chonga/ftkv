@@ -1,4 +1,4 @@
-package server
+package kvserver
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 	"errors"
 	uuid "github.com/satori/go.uuid"
 	"google.golang.org/grpc"
-	"kvraft/proto"
+	"kvraft/kvdb"
 	"kvraft/raft"
 	"kvraft/safegob"
 	"kvraft/tool"
@@ -29,12 +29,12 @@ const SessionTimeout = 1 * time.Hour
 const DefaultMaxRaftState = 30
 
 const (
-	OpenSession kvserver.Op = -2
-	GET         kvserver.Op = -3
+	OpenSession kvdb.Op = -2
+	GET         kvdb.Op = -3
 )
 
 type Op struct {
-	OpType kvserver.Op
+	OpType kvdb.Op
 	Key    string
 	Value  string
 	UUID   string
@@ -46,73 +46,91 @@ type ApplyResult struct {
 }
 
 type KVServer struct {
-	kvserver.kvserver
-	mu            sync.Mutex // big lock
-	me            int
-	maxRaftState  int
-	cleanupIndex  int
-	rf            *raft.Raft
-	applyCh       chan raft.ApplyMsg
-	persister     *tool.Storage
-	replyChan     map[int]chan ApplyResult
-	sessionMap    map[string]time.Time
-	snapshotIndex int
-	password      string
+	kvdb.KVServerServer
+	mu                sync.Mutex // big lock
+	me                int
+	rf                *raft.Raft
+	applyCh           chan raft.ApplyMsg
+	storage           *tool.Storage
+	replyChan         map[int]chan ApplyResult
+	sessionMap        map[string]time.Time
+	maxRaftState      int
+	nextSnapshotIndex int
+	password          string
 
 	// persistent
-	commitIndex int
 	uniqueId    int64
+	commitIndex int
 	tab         map[string]string
 }
 
 //
 // StartKVServer starts a key/value server for rpc call which using raft to keep consistency
 //
-func StartKVServer(serverAddress []string, raftAddresses []string, me int, port int, storageFile *tool.Storage, maxRaftState int, confFile string) (*KVServer, error) {
-	// call safegob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
+func StartKVServer(serverPort int, me int, raftAddresses []string, raftPort int, storage *tool.Storage, maxRaftState int) (*KVServer, error) {
 	safegob.Register(Op{})
-
+	servers := len(raftAddresses) + 1
+	if servers&1 == 0 {
+		return nil, &tool.RuntimeError{Stage: "start KVServer", Err: tool.ErrEvenServers}
+	}
+	if serverPort <= 0 || raftPort <= 0 {
+		return nil, &tool.RuntimeError{Stage: "start KVServer", Err: tool.ErrInvalidPort}
+	}
+	if storage == nil {
+		return nil, &tool.RuntimeError{Stage: "start KVServer", Err: tool.ErrNilStorage}
+	}
 	kv := new(KVServer)
 	kv.me = me
-	kv.maxRaftState = maxRaftState
-	kv.persister = storageFile
+	kv.storage = storage
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.replyChan = make(map[int]chan ApplyResult)
 	kv.sessionMap = make(map[string]time.Time)
-	snapshot := storageFile.ReadSnapshot()
+	kv.commitIndex = 0
+
+	snapshot := storage.ReadSnapshot()
 	if nil != snapshot && len(snapshot) > 0 {
-		kv.recoverFrom(snapshot)
+		err := kv.recoverFrom(snapshot)
+		if err != nil {
+			return nil, &tool.RuntimeError{Stage: "start KVServer", Err: err}
+		}
 	} else {
 		kv.tab = make(map[string]string)
 		kv.uniqueId = 0
-		kv.commitIndex = 0
 	}
 	if maxRaftState > 0 {
 		if maxRaftState < DefaultMaxRaftState {
-			log.Println("info: the maxRaftState set is too small! set to default maxRaftState")
+			log.Println("start KVServer info: the maxRaftState set is too small! set to default maxRaftState")
 			maxRaftState = DefaultMaxRaftState
 		}
-		kv.snapshotIndex = kv.commitIndex + maxRaftState
+		kv.maxRaftState = maxRaftState
+		kv.nextSnapshotIndex = kv.commitIndex + maxRaftState
 	} else {
-		kv.snapshotIndex = -1
+		kv.nextSnapshotIndex = -1
+		kv.maxRaftState = -1
 	}
 	var err error
-	kv.rf, err = raft.StartRaft(raftAddresses, me, port, storageFile, kv.applyCh)
+	// start grpc server
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(serverPort))
 	if err != nil {
-		err = &raft.RuntimeError{Stage: "startraft", Err: err}
+		err = &tool.RuntimeError{Stage: "start KVServer", Err: err}
 		return nil, err
 	}
+
+	kv.rf, err = raft.StartRaft(raftAddresses, me, raftPort, storage, kv.applyCh)
+	if err != nil {
+		return nil, err
+	}
+
 	go kv.startApply()
 	go kv.cleanupSessions()
 
-	// start grpc server
-	listener, _ := net.Listen("tcp", serverAddress[me])
 	server := grpc.NewServer()
-	kvserver.RegisterKVServerServer(server, kv)
+	kvdb.RegisterKVServerServer(server, kv)
 	go func() {
 		_ = server.Serve(listener)
 	}()
+
+	log.Println("start KVServer success, server port:", serverPort)
 	return kv, nil
 }
 
@@ -134,12 +152,12 @@ func logSession(format string, v ...interface{}) {
 	}
 }
 
-func (kv *KVServer) OpenSession(_ context.Context, request *kvserver.OpenSessionRequest) (*kvserver.OpenSessionReply, error) {
-	reply := &kvserver.OpenSessionReply{}
+func (kv *KVServer) OpenSession(_ context.Context, request *kvdb.OpenSessionRequest) (*kvdb.OpenSessionReply, error) {
+	reply := &kvdb.OpenSessionReply{}
 	logSession("[%d] receive OpenSession request from client", kv.me)
 	reply.SessionId = ""
 	if request.GetPassword() != kv.password {
-		reply.ErrCode = kvserver.ErrCode_INVALID_PASSWORD
+		reply.ErrCode = kvdb.ErrCode_INVALID_PASSWORD
 		return reply, nil
 	}
 	command := Op{
@@ -149,25 +167,25 @@ func (kv *KVServer) OpenSession(_ context.Context, request *kvserver.OpenSession
 		UUID:   uuid.NewV4().String(),
 	}
 	applyResult, errCode := kv.submit(command)
-	if errCode == kvserver.ErrCode_OK {
+	if errCode == kvdb.ErrCode_OK {
 		reply.SessionId = applyResult.SessionId
-		reply.ErrCode = kvserver.ErrCode_OK
+		reply.ErrCode = kvdb.ErrCode_OK
 	} else {
 		reply.ErrCode = errCode
 	}
 	return reply, nil
 }
 
-func (kv *KVServer) Get(_ context.Context, args *kvserver.GetRequest) (*kvserver.GetReply, error) {
-	reply := &kvserver.GetReply{}
+func (kv *KVServer) Get(_ context.Context, args *kvdb.GetRequest) (*kvdb.GetReply, error) {
+	reply := &kvdb.GetReply{}
 	log3A("[%d] receive get request from client, sessionId=%s", kv.me, args.SessionId)
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
-		reply.ErrCode = kvserver.ErrCode_WRONG_LEADER
+		reply.ErrCode = kvdb.ErrCode_WRONG_LEADER
 		return reply, nil
 	}
 	if !kv.isSessionValid(args.SessionId) {
-		reply.ErrCode = kvserver.ErrCode_INVALID_SESSION
+		reply.ErrCode = kvdb.ErrCode_INVALID_SESSION
 		return reply, nil
 	}
 	command := Op{
@@ -179,13 +197,13 @@ func (kv *KVServer) Get(_ context.Context, args *kvserver.GetRequest) (*kvserver
 	// start时，不应当持有锁，因为这会阻塞 KVServer 接收来自 raft 的 log
 	// start的命令的返回值的唯一性已经由 raft 的互斥锁保证
 	_, errCode := kv.submit(command)
-	if errCode == kvserver.ErrCode_OK {
+	if errCode == kvdb.ErrCode_OK {
 		kv.mu.Lock()
 		if v, exist := kv.tab[args.Key]; !exist {
-			reply.ErrCode = kvserver.ErrCode_NO_KEY
+			reply.ErrCode = kvdb.ErrCode_NO_KEY
 			reply.Value = ""
 		} else {
-			reply.ErrCode = kvserver.ErrCode_OK
+			reply.ErrCode = kvdb.ErrCode_OK
 			reply.Value = v
 		}
 		kv.mu.Unlock()
@@ -196,22 +214,22 @@ func (kv *KVServer) Get(_ context.Context, args *kvserver.GetRequest) (*kvserver
 	return reply, nil
 }
 
-func (kv *KVServer) Update(_ context.Context, args *kvserver.UpdateRequest) (*kvserver.UpdateReply, error) {
-	reply := &kvserver.UpdateReply{}
+func (kv *KVServer) Update(_ context.Context, args *kvdb.UpdateRequest) (*kvdb.UpdateReply, error) {
+	reply := &kvdb.UpdateReply{}
 	log3A("[%d] receive %v request from client, sessionId=%s", kv.me, args.Op, args.SessionId)
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
-		reply.ErrCode = kvserver.ErrCode_WRONG_LEADER
+		reply.ErrCode = kvdb.ErrCode_WRONG_LEADER
 		return reply, nil
 	}
 	if !kv.isSessionValid(args.SessionId) {
-		reply.ErrCode = kvserver.ErrCode_INVALID_SESSION
+		reply.ErrCode = kvdb.ErrCode_INVALID_SESSION
 		return reply, nil
 	}
 
 	op := args.Op
-	if op != kvserver.Op_PUT && op != kvserver.Op_APPEND && op != kvserver.Op_DELETE {
-		reply.ErrCode = kvserver.ErrCode_INVALID_OP
+	if op != kvdb.Op_PUT && op != kvdb.Op_APPEND && op != kvdb.Op_DELETE {
+		reply.ErrCode = kvdb.ErrCode_INVALID_OP
 		return reply, nil
 	}
 	command := Op{
@@ -241,10 +259,10 @@ func (kv *KVServer) isSessionValid(sessionId string) bool {
 // If the submitted command reaches consensus successfully, the pointer points to the corresponding ApplyResult will be returned;
 // and the pb.ErrCode is pb.ErrCode_OK
 // otherwise, the returned *ApplyResult would be nil and the ErrCode indicating the reason why the command fails to complete
-func (kv *KVServer) submit(op Op) (*ApplyResult, kvserver.ErrCode) {
+func (kv *KVServer) submit(op Op) (*ApplyResult, kvdb.ErrCode) {
 	commandIndex, commandTerm, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		return nil, kvserver.ErrCode_WRONG_LEADER
+		return nil, kvdb.ErrCode_WRONG_LEADER
 	}
 	// leader1(current leader) may be partitioned by itself,
 	// its log may be trimmed by leader2 (if and only if leader2's term > leader1's term)
@@ -264,9 +282,9 @@ func (kv *KVServer) submit(op Op) (*ApplyResult, kvserver.ErrCode) {
 	res := <-ch
 	// log's index and term identifies the unique log
 	if res.Term == commandTerm {
-		return &res, kvserver.ErrCode_OK
+		return &res, kvdb.ErrCode_OK
 	} else {
-		return nil, kvserver.ErrCode_WRONG_LEADER
+		return nil, kvdb.ErrCode_WRONG_LEADER
 	}
 }
 
@@ -277,6 +295,10 @@ func (kv *KVServer) makeSnapshot() ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("encode uniqueId fails: " + err.Error())
 	}
+	err = e.Encode(kv.commitIndex)
+	if err != nil {
+		return nil, errors.New("encode commitIndex fails: " + err.Error())
+	}
 	err = e.Encode(kv.tab)
 	if err != nil {
 		return nil, errors.New("encode tab fails: " + err.Error())
@@ -285,21 +307,30 @@ func (kv *KVServer) makeSnapshot() ([]byte, error) {
 	return w.Bytes(), nil
 }
 
-func (kv *KVServer) recoverFrom(snapshot []byte) {
+func (kv *KVServer) recoverFrom(snapshot []byte) error {
 	if snapshot == nil || len(snapshot) < 1 {
-		return
+		return nil
 	}
 	r := bytes.NewBuffer(snapshot)
 	d := safegob.NewDecoder(r)
 	var tab map[string]string
 	var nextClientId int64
-	if d.Decode(&nextClientId) != nil ||
-		d.Decode(&tab) != nil {
-		log.Fatalf("[%d] decode snapshot failed!", kv.me)
+	var commitIndex int
+	var err error
+	if err = d.Decode(&nextClientId); err != nil {
+		return errors.New("recover from snapshot: decode currentTerm fails: " + err.Error())
+	}
+	if err = d.Decode(&commitIndex); err != nil {
+		return errors.New("recover from snapshot: decode commitIndex fails: " + err.Error())
+	}
+	if err = d.Decode(&tab); err != nil {
+		return errors.New("recover from snapshot: decode tab fails: " + err.Error())
 	}
 	kv.uniqueId = nextClientId
+	kv.commitIndex = commitIndex
 	kv.tab = tab
 	log3B("[%d] read from snapshot success!", kv.me)
+	return nil
 }
 
 // startApply listen to the log sent from applyCh and execute the corresponding command.
@@ -325,21 +356,19 @@ func (kv *KVServer) startApply() {
 				kv.sessionMap[result.SessionId] = time.Now()
 				kv.uniqueId++
 				logSession("[%d] open a new session, sessionId=%s", kv.me, result.SessionId)
-			} else {
-				if kvserver.Op_PUT == commandType {
-					kv.tab[op.Key] = op.Value
-					log3A("[%d] execute put %s on key=%v, sessionId=%s", kv.me, op.Value, op.Key, result.SessionId)
-				} else if kvserver.Op_APPEND == commandType {
-					v := kv.tab[op.Key]
-					v += op.Value
-					kv.tab[op.Key] = v
-					log3A("[%d] execute append %s on key=%v, now value is %s, sessionId=%s", kv.me, op.Value, op.Key, v, result.SessionId)
-				} else if kvserver.Op_DELETE == commandType {
-					delete(kv.tab, op.Key)
-					log3A("[%d execute delete on key=%v, sessionId=%s", kv.me, op.Key, result.SessionId)
-				} else if GET != commandType {
-					log.Printf("[%d] receive unknown request type,sessionId=%s,opType=%s", kv.me, result.SessionId, op.OpType)
-				}
+			} else if kvdb.Op_PUT == commandType {
+				kv.tab[op.Key] = op.Value
+				log3A("[%d] execute put %s on key=%v, sessionId=%s", kv.me, op.Value, op.Key, result.SessionId)
+			} else if kvdb.Op_APPEND == commandType {
+				v := kv.tab[op.Key]
+				v += op.Value
+				kv.tab[op.Key] = v
+				log3A("[%d] execute append %s on key=%v, now value is %s, sessionId=%s", kv.me, op.Value, op.Key, v, result.SessionId)
+			} else if kvdb.Op_DELETE == commandType {
+				delete(kv.tab, op.Key)
+				log3A("[%d execute delete on key=%v, sessionId=%s", kv.me, op.Key, result.SessionId)
+			} else if GET != commandType {
+				log.Printf("[%d] receive unknown request type,sessionId=%s,opType=%s", kv.me, result.SessionId, op.OpType)
 			}
 			kv.commitIndex = msg.CommandIndex
 			if ch, _ := kv.replyChan[kv.commitIndex]; ch != nil {
@@ -349,40 +378,46 @@ func (kv *KVServer) startApply() {
 				delete(kv.replyChan, kv.commitIndex)
 				log3A("[%d] close commandIndex=%d channel", kv.me, msg.CommandIndex)
 			}
-			if kv.maxRaftState > 0 && kv.commitIndex == kv.snapshotIndex {
-				kv.snapshotIndex += kv.maxRaftState
+			if kv.maxRaftState > 0 && kv.commitIndex == kv.nextSnapshotIndex {
+				kv.nextSnapshotIndex += kv.maxRaftState
 				snapshot, err := kv.makeSnapshot()
 				if err != nil {
-					err = &raft.RuntimeError{Stage: "makesnapshot", Err: err}
+					err = &tool.RuntimeError{Stage: "make snapshot", Err: err}
 					panic(err.Error())
 				}
 				kv.rf.Snapshot(kv.commitIndex, snapshot)
 			}
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
-			kv.recoverFrom(msg.Snapshot)
-			kv.commitIndex = msg.SnapshotIndex
+			kv.mu.Lock()
+			err := kv.recoverFrom(msg.Snapshot)
+			if err != nil {
+				panic(err.Error())
+			}
+			if kv.commitIndex != msg.SnapshotIndex {
+				log.Println("warning: commitIndex in snapshot is", kv.commitIndex, "but snapshot index is", msg.SnapshotIndex)
+			}
+			kv.mu.Unlock()
 		} else {
-			log.Println(kv.me, "receive unknown type log, content:", msg)
+			log.Println("warning:", kv.me, "receive unknown type log, log content:", msg)
 		}
 	}
 }
 
-// cleanupSessions scans the sessionMap to clean up the records corresponding to the expired clientId
+// cleanupSessions scans the sessionMap to clean up the records corresponding to the expired session
 func (kv *KVServer) cleanupSessions() {
 	for {
 		time.Sleep(SessionTimeout)
 		kv.mu.Lock()
 		var deleteArr []string
 
-		for clientId := range kv.sessionMap {
-			lastVisitTime, visit := kv.sessionMap[clientId]
-			if !visit || time.Since(lastVisitTime) >= SessionTimeout {
-				deleteArr = append(deleteArr, clientId)
+		for sessionId, lastVisitTime := range kv.sessionMap {
+			if time.Since(lastVisitTime) >= SessionTimeout {
+				deleteArr = append(deleteArr, sessionId)
 			}
 		}
-		for _, c := range deleteArr {
-			delete(kv.sessionMap, c)
+		for _, s := range deleteArr {
+			delete(kv.sessionMap, s)
 		}
 		kv.mu.Unlock()
 	}
