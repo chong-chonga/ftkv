@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"errors"
-	"kvraft/safegob"
 	"kvraft/tool"
 	"log"
 	"math/rand"
@@ -19,10 +18,10 @@ import (
 
 // 为了方便使用日志进行debug或者进行测试, 使用常量开关来控制日志的打印
 const (
-	LogElectionEnabled    = false
-	LogAppendEntryEnabled = false
-	LogPersistRaftState   = false
-	LogSnapshotEnabled    = false
+	LogElectionEnabled    = true
+	LogAppendEntryEnabled = true
+	LogPersistRaftState   = true
+	LogSnapshotEnabled    = true
 )
 
 const (
@@ -200,7 +199,7 @@ func (rf *Raft) recoverFrom(state []byte) error {
 		return nil
 	}
 	buf := bytes.NewBuffer(state)
-	d := safegob.NewDecoder(buf)
+	d := gob.NewDecoder(buf)
 
 	var currentTerm int
 	var votedFor int
@@ -236,6 +235,32 @@ func (rf *Raft) recoverFrom(state []byte) error {
 	}
 	logPersistence("[%d] restore raft state from persist success!", rf.me)
 	return nil
+}
+
+func (rf *Raft) makeRaftState() ([]byte, error) {
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	err := e.Encode(rf.currentTerm)
+	if err != nil {
+		return nil, errors.New("encode currentTerm fails: " + err.Error())
+	}
+	err = e.Encode(rf.votedFor)
+	if err != nil {
+		return nil, errors.New("encode votedFor fails: " + err.Error())
+	}
+	err = e.Encode(rf.lastIncludedIndex)
+	if err != nil {
+		return nil, errors.New("encode lastIncludedIndex fails: " + err.Error())
+	}
+	err = e.Encode(rf.lastIncludedTerm)
+	if err != nil {
+		return nil, errors.New("encode lastIncludedTerm fails: " + err.Error())
+	}
+	err = e.Encode(rf.log)
+	if err != nil {
+		return nil, errors.New("encode log fails: " + err.Error())
+	}
+	return w.Bytes(), nil
 }
 
 // applyLog
@@ -327,32 +352,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 	}
 	return index, term, isLeader
-}
-
-func (rf *Raft) makeRaftState() ([]byte, error) {
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
-	err := e.Encode(rf.currentTerm)
-	if err != nil {
-		return nil, errors.New("encode currentTerm fails: " + err.Error())
-	}
-	err = e.Encode(rf.votedFor)
-	if err != nil {
-		return nil, errors.New("encode votedFor fails: " + err.Error())
-	}
-	err = e.Encode(rf.lastIncludedIndex)
-	if err != nil {
-		return nil, errors.New("encode lastIncludedIndex fails: " + err.Error())
-	}
-	err = e.Encode(rf.lastIncludedTerm)
-	if err != nil {
-		return nil, errors.New("encode lastIncludedTerm fails: " + err.Error())
-	}
-	err = e.Encode(rf.log)
-	if err != nil {
-		return nil, errors.New("encode log fails: " + err.Error())
-	}
-	return w.Bytes(), nil
 }
 
 //

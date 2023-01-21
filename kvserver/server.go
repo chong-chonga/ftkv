@@ -9,7 +9,6 @@ import (
 	"google.golang.org/grpc"
 	"kvraft/kvdb"
 	"kvraft/raft"
-	"kvraft/safegob"
 	"kvraft/tool"
 	"log"
 	"net"
@@ -27,6 +26,8 @@ const (
 const SessionTimeout = 1 * time.Hour
 
 const DefaultMaxRaftState = 30
+
+const SessionIdSeparator = "-"
 
 const (
 	OpenSession kvdb.Op = -2
@@ -68,7 +69,7 @@ type KVServer struct {
 // StartKVServer starts a key/value server for rpc call which using raft to keep consistency
 //
 func StartKVServer(serverPort int, me int, raftAddresses []string, raftPort int, storage *tool.Storage, maxRaftState int) (*KVServer, error) {
-	safegob.Register(Op{})
+	gob.Register(Op{})
 	servers := len(raftAddresses) + 1
 	if servers&1 == 0 {
 		return nil, &tool.RuntimeError{Stage: "start KVServer", Err: tool.ErrEvenServers}
@@ -184,7 +185,7 @@ func (kv *KVServer) Get(_ context.Context, args *kvdb.GetRequest) (*kvdb.GetRepl
 		reply.ErrCode = kvdb.ErrCode_WRONG_LEADER
 		return reply, nil
 	}
-	if !kv.isSessionValid(args.SessionId) {
+	if !kv.checkSession(args.SessionId) {
 		reply.ErrCode = kvdb.ErrCode_INVALID_SESSION
 		return reply, nil
 	}
@@ -194,11 +195,10 @@ func (kv *KVServer) Get(_ context.Context, args *kvdb.GetRequest) (*kvdb.GetRepl
 		Value:  "",
 	}
 	log3A("[%d] start get request, sessionId=%s", kv.me, args.SessionId)
-	// start时，不应当持有锁，因为这会阻塞 KVServer 接收来自 raft 的 log
-	// start的命令的返回值的唯一性已经由 raft 的互斥锁保证
+
 	_, errCode := kv.submit(command)
 	if errCode == kvdb.ErrCode_OK {
-		kv.mu.Lock()
+		// 为提高读取时的性能，允许出现data race
 		if v, exist := kv.tab[args.Key]; !exist {
 			reply.ErrCode = kvdb.ErrCode_NO_KEY
 			reply.Value = ""
@@ -206,7 +206,6 @@ func (kv *KVServer) Get(_ context.Context, args *kvdb.GetRequest) (*kvdb.GetRepl
 			reply.ErrCode = kvdb.ErrCode_OK
 			reply.Value = v
 		}
-		kv.mu.Unlock()
 	} else {
 		reply.ErrCode = errCode
 	}
@@ -222,7 +221,7 @@ func (kv *KVServer) Update(_ context.Context, args *kvdb.UpdateRequest) (*kvdb.U
 		reply.ErrCode = kvdb.ErrCode_WRONG_LEADER
 		return reply, nil
 	}
-	if !kv.isSessionValid(args.SessionId) {
+	if !kv.checkSession(args.SessionId) {
 		reply.ErrCode = kvdb.ErrCode_INVALID_SESSION
 		return reply, nil
 	}
@@ -243,7 +242,7 @@ func (kv *KVServer) Update(_ context.Context, args *kvdb.UpdateRequest) (*kvdb.U
 	return reply, nil
 }
 
-func (kv *KVServer) isSessionValid(sessionId string) bool {
+func (kv *KVServer) checkSession(sessionId string) bool {
 	kv.mu.Lock()
 	if _, valid := kv.sessionMap[sessionId]; valid {
 		kv.sessionMap[sessionId] = time.Now()
@@ -260,6 +259,8 @@ func (kv *KVServer) isSessionValid(sessionId string) bool {
 // and the pb.ErrCode is pb.ErrCode_OK
 // otherwise, the returned *ApplyResult would be nil and the ErrCode indicating the reason why the command fails to complete
 func (kv *KVServer) submit(op Op) (*ApplyResult, kvdb.ErrCode) {
+	// start时，不应当持有锁，因为这会阻塞 KVServer 接收来自 raft 的 log
+	// start的命令的返回值的唯一性已经由 raft 的互斥锁保证
 	commandIndex, commandTerm, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		return nil, kvdb.ErrCode_WRONG_LEADER
@@ -312,7 +313,7 @@ func (kv *KVServer) recoverFrom(snapshot []byte) error {
 		return nil
 	}
 	r := bytes.NewBuffer(snapshot)
-	d := safegob.NewDecoder(r)
+	d := gob.NewDecoder(r)
 	var tab map[string]string
 	var nextClientId int64
 	var commitIndex int
@@ -339,53 +340,56 @@ func (kv *KVServer) startApply() {
 	for {
 		msg := <-kv.applyCh
 		if msg.CommandValid {
-			log3B("[%d] receive log, commandIndex=%d,commandTerm=%d", msg.CommandIndex, msg.CommandTerm)
-			result := ApplyResult{
-				Term: msg.CommandTerm,
-			}
+			commandIndex := msg.CommandIndex
+			commandTerm := msg.CommandTerm
+			log3B("[%d] receive log, commandIndex=%d,commandTerm=%d", kv.me, commandIndex, commandTerm)
 			kv.mu.Lock()
-			if msg.CommandIndex < kv.commitIndex {
+			if commandIndex < kv.commitIndex {
 				kv.mu.Unlock()
-				log.Println(kv.me, "ignore out dated log, expected log index", kv.commitIndex+1, "but receive", msg.CommandIndex)
+				log.Println(kv.me, "ignore out dated log, expected log index", kv.commitIndex+1, "but receive", commandIndex)
 				continue
 			}
+			kv.commitIndex = commandIndex
 			op := msg.Command.(Op)
 			commandType := op.OpType
+			sessionId := ""
 			if OpenSession == commandType {
-				result.SessionId = strconv.FormatInt(kv.uniqueId, 10) + "-" + op.UUID
-				kv.sessionMap[result.SessionId] = time.Now()
+				sessionId = strconv.FormatInt(kv.uniqueId, 10) + SessionIdSeparator + op.UUID
+				kv.sessionMap[sessionId] = time.Now()
 				kv.uniqueId++
-				logSession("[%d] open a new session, sessionId=%s", kv.me, result.SessionId)
+				logSession("[%d] open a new session, sessionId=%s", kv.me, sessionId)
 			} else if kvdb.Op_PUT == commandType {
 				kv.tab[op.Key] = op.Value
-				log3A("[%d] execute put %s on key=%v, sessionId=%s", kv.me, op.Value, op.Key, result.SessionId)
+				log3A("[%d] execute put %s on key=%v, sessionId=%s", kv.me, op.Value, op.Key)
 			} else if kvdb.Op_APPEND == commandType {
 				v := kv.tab[op.Key]
 				v += op.Value
 				kv.tab[op.Key] = v
-				log3A("[%d] execute append %s on key=%v, now value is %s, sessionId=%s", kv.me, op.Value, op.Key, v, result.SessionId)
+				log3A("[%d] execute append %s on key=%v, now value is %s", kv.me, op.Value, op.Key, v)
 			} else if kvdb.Op_DELETE == commandType {
 				delete(kv.tab, op.Key)
-				log3A("[%d execute delete on key=%v, sessionId=%s", kv.me, op.Key, result.SessionId)
+				log3A("[%d execute delete on key=%v", kv.me, op.Key)
 			} else if GET != commandType {
-				log.Printf("[%d] receive unknown request type,sessionId=%s,opType=%s", kv.me, result.SessionId, op.OpType)
+				log.Printf("[%d] receive unknown request type,opType=%s", kv.me, op.OpType)
 			}
-			kv.commitIndex = msg.CommandIndex
-			if ch, _ := kv.replyChan[kv.commitIndex]; ch != nil {
-				log3A("[%d] finish commandIndex=%d,commandTerm=%d", kv.me, msg.CommandIndex, msg.CommandTerm)
-				ch <- result
+			if ch, _ := kv.replyChan[commandIndex]; ch != nil {
+				log3A("[%d] finish commandIndex=%d,commandTerm=%d", kv.me, commandIndex, commandTerm)
+				ch <- ApplyResult{
+					SessionId: sessionId,
+					Term:      commandTerm,
+				}
 				close(ch)
-				delete(kv.replyChan, kv.commitIndex)
-				log3A("[%d] close commandIndex=%d channel", kv.me, msg.CommandIndex)
+				delete(kv.replyChan, commandIndex)
+				log3A("[%d] close commandIndex=%d channel", kv.me, commandIndex)
 			}
-			if kv.maxRaftState > 0 && kv.commitIndex == kv.nextSnapshotIndex {
-				kv.nextSnapshotIndex += kv.maxRaftState
+			if kv.maxRaftState > 0 && commandIndex == kv.nextSnapshotIndex {
+				kv.nextSnapshotIndex = commandIndex + kv.maxRaftState
 				snapshot, err := kv.makeSnapshot()
 				if err != nil {
 					err = &tool.RuntimeError{Stage: "make snapshot", Err: err}
 					panic(err.Error())
 				}
-				kv.rf.Snapshot(kv.commitIndex, snapshot)
+				kv.rf.Snapshot(commandIndex, snapshot)
 			}
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
@@ -395,7 +399,7 @@ func (kv *KVServer) startApply() {
 				panic(err.Error())
 			}
 			if kv.commitIndex != msg.SnapshotIndex {
-				log.Println("warning: commitIndex in snapshot is", kv.commitIndex, "but snapshot index is", msg.SnapshotIndex)
+				log.Println("warning: commitIndex in snapshot is", kv.commitIndex, "but raft snapshot index is", msg.SnapshotIndex)
 			}
 			kv.mu.Unlock()
 		} else {
