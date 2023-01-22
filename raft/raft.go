@@ -18,10 +18,10 @@ import (
 
 // 为了方便使用日志进行debug或者进行测试, 使用常量开关来控制日志的打印
 const (
-	LogElectionEnabled    = true
-	LogAppendEntryEnabled = true
-	LogPersistRaftState   = true
-	LogSnapshotEnabled    = true
+	LogElectionEnabled    = false
+	LogAppendEntryEnabled = false
+	LogPersistRaftState   = false
+	LogSnapshotEnabled    = false
 )
 
 const (

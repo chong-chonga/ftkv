@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	Log3AEnabled      = true
-	Log3BEnabled      = true
-	LogSessionEnabled = true
+	Log3AEnabled      = false
+	Log3BEnabled      = false
+	LogSessionEnabled = false
 )
 
 const SessionTimeout = 1 * time.Hour
@@ -110,13 +110,14 @@ func StartKVServer(serverPort int, me int, raftAddresses []string, raftPort int,
 		kv.maxRaftState = -1
 	}
 	var err error
-	// start grpc server
+
 	listener, err := net.Listen("tcp", ":"+strconv.Itoa(serverPort))
 	if err != nil {
 		err = &tool.RuntimeError{Stage: "start KVServer", Err: err}
 		return nil, err
 	}
 
+	// no errors, start the raft
 	kv.rf, err = raft.StartRaft(raftAddresses, me, raftPort, storage, kv.applyCh)
 	if err != nil {
 		return nil, err
@@ -125,6 +126,7 @@ func StartKVServer(serverPort int, me int, raftAddresses []string, raftPort int,
 	go kv.startApply()
 	go kv.cleanupSessions()
 
+	// start grpc server
 	server := grpc.NewServer()
 	kvdb.RegisterKVServerServer(server, kv)
 	go func() {
