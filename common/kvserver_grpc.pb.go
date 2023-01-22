@@ -4,7 +4,7 @@
 // - protoc             v3.21.9
 // source: kvserver.proto
 
-package kvdb
+package common
 
 import (
 	context "context"

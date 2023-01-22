@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-option go_package = ".;kvdb";
+option go_package = ".;common";
 
 service KVServer {
     rpc OpenSession (OpenSessionRequest) returns (OpenSessionReply);
