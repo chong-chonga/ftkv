@@ -32,3 +32,7 @@ func MakePeer(addr string) *Peer {
 	p.addr = addr
 	return p
 }
+
+func (p *Peer) GetAddr() string {
+	return p.addr
+}
