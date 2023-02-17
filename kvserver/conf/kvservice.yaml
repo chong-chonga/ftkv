@@ -21,9 +21,9 @@ raft:
   # 指定集群中其他Raft运行的地址（包括端口）
   server-addresses: [ '127.0.0.1:8084', '127.0.0.1:8085' ]
   randomInterval: 150
-  electionTimeout: 360
+  minElectionTimeout: 350
   log:
-    requestVoteEnabled: false
-    appendEntryEnabled: false
-    installSnapshotEnabled: false
-    persistEnabled: false
+    requestVoteEnabled: true
+    appendEntryEnabled: true
+    installSnapshotEnabled: true
+    persistEnabled: true
