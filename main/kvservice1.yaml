@@ -1,0 +1,29 @@
+# Raft在进行领导者选举时自身的CandidateId。Raft集群中的me不允许重复，否则可能会领导者选举失败或者多个领导者。
+# 另外，me也用于KVServer和Raft的日志标识。
+me: 1
+kvserver:
+  # KVServer在处理Client的任何请求之前，Client必须向KVServer发起一次OpenSession请求以获取会话标识
+  # 该请求中携带的密码必须和KVServer一致，否则KVServer会拒绝Client的请求
+  # 当KVServer需要支持远程访问时，这个设置会起保护作用
+  password: 123456
+  # 指定KVServer处理哪个端口的请求，默认8080，
+  # 鉴于KVServer是基于GRPC调用，而Raft是基于Go RPC的，因此KVServer的端口不要与Raft的端口相同
+  port: 8080
+  # 指定KVServer在成功处理多少命令后，KVServer会保存快照
+  maxRaftState: 30
+  # 指定会话标识在多久没有使用后过期，单位：秒
+  sessionTimeout: 3600
+  # 是否开启KVServer日志，这在debug时会很有用
+  logEnabled: false
+raft:
+  # 指定Raft运行在哪个端口
+  port: 8083
+  # 指定集群中其他Raft运行的地址（包括端口）
+  server-addresses: [ '127.0.0.1:8084', '127.0.0.1:8085' ]
+  randomInterval: 150
+  minElectionTimeout: 350
+  log:
+    requestVoteEnabled: true
+    appendEntryEnabled: true
+    installSnapshotEnabled: true
+    persistEnabled: true
