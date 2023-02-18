@@ -5,6 +5,7 @@ import (
 	"github.com/pkg/errors"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"runtime"
 	"strconv"
@@ -35,7 +36,6 @@ const fileHeader = "RAFT"
 
 // Storage is not thread safe
 type Storage struct {
-	initialized          bool
 	raftState            []byte
 	snapshot             []byte
 	nextRaftStateVersion int64
@@ -112,6 +112,7 @@ func MakeStorage(serverNum int) (*Storage, error) {
 	}
 	s.raftStatePath = raftStatePath
 	s.snapshotPath = snapshotPath
+	log.Printf("raft state is stored in %s, snapshot and raft state is stored in %s", raftStatePath, snapshotPath)
 	err := s.initRead()
 	if err != nil {
 		return nil, err
