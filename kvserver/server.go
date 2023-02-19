@@ -117,7 +117,7 @@ func StartKVServer(config []byte) (*KVServer, error) {
 			maxRaftState = DefaultMaxRaftState
 		}
 		nextSnapshotIndex = kv.commitIndex + maxRaftState
-		kv.logPrintf("configure KVServer info: KVServer will make a snapshot per %d operations", maxRaftState)
+		log.Printf("configure KVServer info: KVServer will make a snapshot per %d operations", maxRaftState)
 	} else {
 		log.Println("configure KVServer info: KVServer won't make snapshot")
 		nextSnapshotIndex = -1
@@ -130,7 +130,7 @@ func StartKVServer(config []byte) (*KVServer, error) {
 			log.Println("configure KVServer info: sessionTimeout is not set, use default")
 			sessionTimeout = DefaultSessionTimeout
 		}
-		kv.logPrintf("configure KVServer info: any idle sessions will expired after %d s", sessionTimeout)
+		log.Printf("configure KVServer info: any idle sessions will expired after %d s", sessionTimeout)
 	} else {
 		log.Println("configure KVServer info: session will never expire")
 	}
@@ -139,7 +139,10 @@ func StartKVServer(config []byte) (*KVServer, error) {
 	kv.maxRaftState = maxRaftState
 	kv.nextSnapshotIndex = nextSnapshotIndex
 	kv.sessionTimeout = time.Duration(sessionTimeout) * time.Second
-	kv.logEnabled = kvServerConf.LogEnabled
+	if kvServerConf.LogEnabled {
+		kv.logEnabled = true
+		log.Println("configure KVServer info: enable service log")
+	}
 
 	// start listener
 	listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
@@ -176,7 +179,7 @@ func StartKVServer(config []byte) (*KVServer, error) {
 func (kv *KVServer) logPrintf(format string, v ...interface{}) {
 	if kv.logEnabled {
 		prefix := fmt.Sprintf("[%d]: ", kv.me)
-		kv.logPrintf(prefix+format, v)
+		log.Printf(prefix+format, v...)
 	}
 }
 
