@@ -144,7 +144,7 @@ func StartRaft(me int, storage *tool.Storage, applyCh chan ApplyMsg, conf conf.R
 
 	// apply configuration
 	addresses := conf.ServerAddresses
-	err = check(addresses)
+	err = tool.Check(addresses)
 	if err != nil {
 		return nil, &tool.RuntimeError{Stage: "configure Raft", Err: err}
 	}
@@ -202,56 +202,6 @@ func StartRaft(me int, storage *tool.Storage, applyCh chan ApplyMsg, conf conf.R
 
 	log.Println("start Raft server success, serves at port", port, ", other raft server addresses:", addresses)
 	return rf, nil
-}
-
-func check(addresses []string) error {
-	if len(addresses) == 0 {
-		return nil
-	}
-	m := make(map[string]byte)
-	for _, address := range addresses {
-		if len(address) == 0 {
-			return errors.New(address + " is not a valid ip address")
-		}
-		sp := strings.Split(address, ":")
-		if len(sp) == 1 {
-			return errors.New(address + " port not specified")
-		}
-		if !valid(sp[0]) {
-			return errors.New(address + " is not a valid ip address")
-		}
-		if _, duplicate := m[address]; duplicate {
-			return errors.New("duplicate ip address: " + address)
-		}
-		m[address] = 1
-	}
-	return nil
-}
-
-func valid(queryIP string) bool {
-	if sp := strings.Split(queryIP, "."); len(sp) == 4 {
-		for _, s := range sp {
-			if len(s) > 1 && s[0] == '0' {
-				return false
-			}
-			if v, err := strconv.Atoi(s); err != nil || v > 255 {
-				return false
-			}
-		}
-		return true
-	}
-	if sp := strings.Split(queryIP, ":"); len(sp) == 8 {
-		for _, s := range sp {
-			if len(s) > 4 {
-				return false
-			}
-			if _, err := strconv.ParseUint(s, 16, 64); err != nil {
-				return false
-			}
-		}
-		return true
-	}
-	return false
 }
 
 func (rf *Raft) logRequestVote(format string, v ...interface{}) {
