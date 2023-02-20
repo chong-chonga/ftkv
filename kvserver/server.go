@@ -21,8 +21,6 @@ import (
 
 const DefaultSessionTimeout = 60 * 60 // 1h
 
-const DefaultMaxRaftState = 100
-
 const SessionIdSeparator = "-"
 
 const (
@@ -111,11 +109,7 @@ func StartKVServer(config []byte) (*KVServer, error) {
 	// apply configuration
 	maxRaftState := kvServerConf.MaxRaftState
 	var nextSnapshotIndex int
-	if maxRaftState >= 0 {
-		if maxRaftState == 0 {
-			log.Println("configure KVServer info: maxRaftState is not set, use default")
-			maxRaftState = DefaultMaxRaftState
-		}
+	if maxRaftState > 0 {
 		nextSnapshotIndex = kv.commitIndex + maxRaftState
 		log.Printf("configure KVServer info: KVServer will make a snapshot per %d operations", maxRaftState)
 	} else {
