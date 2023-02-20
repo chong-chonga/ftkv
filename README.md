@@ -2,33 +2,33 @@
 一种具有强一致性的分布式键值对存储系统，基于raft共识算法提供一种可靠的方式来存储需要由分布式系统或机器集群访问的数据。支持Get、Put、Append、Delete四种操作。
 它可以在网络分区期间进行领导者选举，并可以容忍机器故障。Server支持grpc调用，具备密码认证、会话管理、重启恢复等特性；Client支持在备机间自动故障转移。
 
+## Background
+思路来源于[6.824: Distributed Systems Spring 2021](http://nil.csail.mit.edu/6.824/2021/) lab2-lab3。这两个实验实现了一个简易的raft和kvserice，
+这个raft虽然实现了论文中提到的大部分功能，如领导者选举、日志共识、日志压缩等，kvservice也能够利用raft达到强一致性和高可用，但也存在不足之处：
+raft并没有实现真正的持久化，使用的rpc也不是真正的RPC调用，kvservice不支持删除等等。怀着让kvservice成为一个真正可用的键值对存储系统的心，
+[Fault-tolerant Key/Value Service](https://github.com/chong-chonga/FaultTolerantKVService)由此而来。
+
 ## Problems
 在开发FT-KVServer时，存在很多问题，以下是我的思考
 
-### Raft state 和 snapshot 如何持久化
-如果在持久化 raft 的状态时，也必须得写入 snapshot 的话，当 snapshot 的体积变大时，这样的写入会越来越慢
+### Raft如何持久化
+Raft在两种情况下要进行持久化：
+1. raft本身状态发生改变时，持久化raft state，较为频繁
+2. raft安装snapshot时（快照），持久化raft state 和 snapshot，相对较少
+   这两种操作都必须是原子的且必须等待数据真正写入到磁盘，尤其是第二种操作，必须保证raft state和snapshot是一致的。
+   既然有两种数据需要持久化，因此就引出了另一个问题。
+   将数据保存在一个文件还是多个文件？
+   ● 单个文件：将raft state和snapshot一起存储，就能保证每次写入的原子性，不用担心部分文件写入过程中崩溃，从而导致多个文件保存的数据不一致。缺点就是单次写入的数据量增多，因为每次持久化都要写入snapshot；当snapshot很大时且写入频繁时，写入开销会很大，因此要控制snapshot的大小。
+   ● 多个文件：只持久化raft state时，写入一个文件；同时持久化raft state和snapshot时，写入另一个文件；为了确定两个文件中的raft state哪个更新，可以使用在写入时使用版本号来进行标识。这样写入的好处是避免写入不必要的数据，snapshot的大小不会影响 raft state的写入速度。缺点就是，增大了持久化的复杂度，且读取raft state时要读取两个文件才能确定哪个raft state的版本更大。
 
-写入策略：
-单单持久化 raft state 时，可以在 .rf 文件写入，同时保存 raft state 的版本号，每次写入都会递增该版本号
-同时持久化 raft state 和 snapshot 时，可以在 .rfs 文件写入，同时保存 raft state 的版本号
+将数据写入磁盘所耗费的时间中，大多数情况下数据传输时间占比较小，寻道时间和磁盘旋转时间占了绝大部分。
+当写入数据量较小时，更应当确保数据是顺序写入的；如果要在多个不同文件写入数据，则耗费的时间可能比写入单个文件更多。但在上述两种情况中，不管是保存在单个文件还是多个文件，每次写入只会打开一个文件写入，可以认为它们的寻道时间和磁盘旋转时间是一样的，因此它们的不同点在于写入数据量的大小。因此，我选择第二种方案为raft提供持久化。
 
-读取策略：
-当需要读取 raft state 时，如果只存在 .rf 文件，则读取并返回
-如果还存在.rfs 文件，则读取这两个文件中的 raft state，返回版本号更大的那一个
-当需要读取 snapshot 时，则读取 .rfs 文件，并将其返回
-.rfs文件内容格式如下：
-RAFT -- file header（四个字节大小，string类型）
-stateVersion -- version of raft state（8个字节大小，int64类型)
-stateSize -- size of raft state（4个字节大小，int类型）
-state(bytes) -- raft state（字节数组，stateSize字节）
-snapshot(bytes) -- snapshot of service（字节数组，直到文件EOF）
-
-先写在内存，然后定时将其写回磁盘可以提高性能，但是会牺牲一致性。
-每次修改 raft state 时，都将其写回磁盘，可以提高这个分布式键值对存储系统的一致性。
+这里有另外一种思路：将所有内容都保存在NVDRAM中，在DRAM电源故障时，备用电源会将数据全部保存在SSD中（就像[FaRM](https://www.youtube.com/watch?v=UoL3FGcDsE4)做的那样子）。
+由于DRAM和SSD之间的速度差距，使用DRAM的确会非常的快；但不是每个人都能使用NVDRAM存储。 只有在非常追求性能时才能采用。
 
 ### KVServer有过滤重复的相同请求的必要吗
-我开发KVServer的想法是来自于 6.824#Lab3 的，正是因为做了这个实验，所以想在这个实验的基础上做一个mini版的键值对存储系统的。
-代码是在Lab3的基础上进行开发的，Lab3是假设了一些前提的：一个客户端一次只会发送一个请求，请求没有完成时会一直重试。
+[lab3](http://nil.csail.mit.edu/6.824/2021/labs/lab-kvraft.html)是进行了一些假设的，例如一个客户端一次只会发送一个请求、假如命令迟迟没有达成共识，客户端会一直等待下去。
 基于这个假设，KVServer就需要过滤客户端相同且重复的请求。为此，可以使用ClientId+RequestId来标记客户端的请求。
 客户端从KVServer拿到ClientId(单调递增，保证唯一)后，RequestId初始化为1，每次完成一个请求后，RequestId原子递增。
 KVServer用于检测重复请求的代码如下：
@@ -58,12 +58,11 @@ func (kv *KVServer) startApply() {
 	}
 }
 ```
-但是很显然，实际使用KVServer时是不会这样的。实际上 如果请求迟迟没有完成，是不应该一直等待下去的，而是应该有一个超时时间。
-创建的客户端可能会被多个使用者使用，同一时间可能会发出多个请求。 采用上面的ClientId+RequestId来检测重复请求是不行的。
-如果要存储所有的ClientId+RequestId，不仅增加了系统复杂度，还增大了内存消耗。因此这段代码被移除。
+现实情况是：如果请求迟迟没有完成，是不应该一直等待下去的，而是应该有一个超时时间（RPCTimeout）。另外， 单个客户端同一时间可能会发出多个请求（并发）。 
+采用上面的ClientId+RequestId来检测重复请求显然是不现实的。如果KVServer要存储所有的ClientId+RequestId，不仅增加了系统复杂度，还增大了内存消耗。
+经过上述考虑，这段代码从KVServer中移除。
 
 ### 如何验证客户端的身份
-
 
 - **背景**：我们不希望自己的KVServer被随意访问，因此想要给KVServer加上一层认证措施，只有符合条件的客户端的请求才能被处理。
   这里当然会想到给KVServer设置密码，只有客户端提供正确的密码后，才是通过认证的客户端。
@@ -95,8 +94,6 @@ func (kv *KVServer) startApply() {
 
 再思考深一点，如果就是想保证生成的uuid就是唯一的呢，可否用现有的Raft做到？
 
-
-
 ## 客户端看到的故障模型
 KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕机等情况。KVServer对外暴露接口供客户端进行RPC调用。
 一般情况下，KVServer是以集群的形式存在的，而根据Raft共识算法，只有集群中的Leader才能处理请求。
@@ -112,9 +109,10 @@ KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕�
 而对于第三种情况来说，客户端的请求可能会执行也可能不会执行；对客户端而言，命令没有达成共识和网络延迟是一样的情况，请求是否执行对于客户端来说也是不确定的。
 
 ## 有哪些地方是可以改进的？
-1. 关于提供持久化RaftState和Snapshot的Storage，写入磁盘是调用的OS的sync，而像MySQL这种数据库是自己实现了磁盘的写入，更快。
+1. 目前，service与raft之间的通信采用的是阻塞式的**channel**，尽管raft发送log/snapshot是由乐观锁控制的，因此raft发送和service接收的间隔内浪费了部分性能。可以采用缓冲式的
+**channel**来减少间隔的出现频率。缓冲不应该设置的太大，否则会浪费空间（时空权衡又来了），缓冲的大小应该视service处理速度与raft发送速度的差距而定。
 
-## 比较特别的地方
+## About
 
 ### 1. 设计请求处理流程
 
