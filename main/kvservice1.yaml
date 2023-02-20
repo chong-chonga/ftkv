@@ -9,21 +9,28 @@ kvserver:
   # 指定KVServer处理哪个端口的请求，默认8080，
   # 鉴于KVServer是基于GRPC调用，而Raft是基于Go RPC的，因此KVServer的端口不要与Raft的端口相同
   port: 8080
-  # 指定KVServer在成功处理多少命令后，KVServer会保存快照
-  maxRaftState: 30
-  # 指定会话标识在多久没有使用后过期，单位：秒
+  # 指定KVServer保存快照的频率（可选），设置的值越大，保存的频率就越小
+  # 当设置的 maxRaftState <= 0时，KVServer不会启用快照功能（默认）
+  maxRaftState: 100
+  # 指定会话标识的过期时间（可选），默认为1h，单位：秒
   sessionTimeout: 3600
-  # 是否开启KVServer日志，这在debug时会很有用
+  # 是否开启KVServer日志（可选），默认不开启，这在debug时会很有用
   logEnabled: false
 raft:
-  # 指定Raft运行在哪个端口
+  # Raft运行的端口
   port: 8083
-  # 指定集群中其他Raft运行的地址（包括端口）
+  # 集群中其他Raft的ip地址+端口（必须配置）
   server-addresses: [ '127.0.0.1:8084', '127.0.0.1:8085' ]
+  # raft超时时间的随机区间（可选），单位：毫秒，默认为150ms，即网络延迟比较高的情况下接收到RPC的所需时间
   randomInterval: 150
-  minElectionTimeout: 350
+  # raft的领导者选举的超时时间（可选），单位：毫秒，默认为350ms，即连续三次未收到heartbeat的大致时间
+  electionTimeout: 350
   log:
-    requestVoteEnabled: true
-    appendEntryEnabled: true
-    installSnapshotEnabled: true
-    persistEnabled: true
+    # 是否开启raft election的日志（可选），默认关闭
+    requestVoteEnabled: false
+    # 是否开启raft log的共识日志（可选），默认关闭
+    appendEntryEnabled: false
+    # 是否开启raft 压缩log的日志（可选），默认关闭
+    installSnapshotEnabled: false
+    # 是否开启raft 持久化的日志（可选），默认关闭
+    persistEnabled: false
