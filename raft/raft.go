@@ -19,6 +19,10 @@ import (
 
 const HeartbeatInterval = 100 // millisecond
 
+const DefaultRandomInterval = 150
+
+const DefaultElectionTimeout = 350
+
 const (
 	Follower  = "Follower"
 	Candidate = "Candidate"
@@ -161,12 +165,21 @@ func StartRaft(me int, storage *tool.Storage, applyCh chan ApplyMsg, conf conf.R
 		rf.commitIndex = rf.lastIncludedIndex + len(rf.log)
 	}
 	log.Printf("configure Raft info: total raft servers is %d, majority number is %d, address of other rafts: %v", totalServers, minMajorityVotes, addresses)
-	if conf.RandomInterval < 0 || conf.MinElectionTimeout <= 0 {
-		return nil, &tool.RuntimeError{Stage: "configure Raft", Err: errors.New("invalid timeout")}
+	randomInterval := conf.RandomInterval
+	if randomInterval < 0 {
+		return nil, &tool.RuntimeError{Stage: "configure Raft", Err: errors.New("invalid random interval")}
+	} else if randomInterval == 0 {
+		randomInterval = DefaultRandomInterval
+	}
+	electionTimeout := conf.ElectionTimeout
+	if electionTimeout < 0 {
+		return nil, &tool.RuntimeError{Stage: "configure Raft", Err: errors.New("invalid election timeout")}
+	} else if electionTimeout == 0 {
+		electionTimeout = DefaultElectionTimeout
 	}
 	rf.randomInterval = conf.RandomInterval
-	rf.minElectionTimeout = conf.MinElectionTimeout
-	log.Printf("configure Raft info: minimum election timeout is %dms, maximum election timeout is %dms", conf.MinElectionTimeout, conf.MinElectionTimeout+conf.RandomInterval)
+	rf.minElectionTimeout = conf.ElectionTimeout
+	log.Printf("configure Raft info: minimum election timeout is %dms, maximum election timeout is %dms", conf.ElectionTimeout, conf.ElectionTimeout+conf.RandomInterval)
 	if conf.Log.RequestVoteEnabled {
 		rf.requestVoteLogEnabled = true
 		log.Println("configure Raft info: enable request vote log")
