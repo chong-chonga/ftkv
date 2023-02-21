@@ -20,11 +20,11 @@ type KVServerConf struct {
 }
 
 type RaftConf struct {
-	Port               int      `yaml:"port"`
-	ServerAddresses    []string `yaml:"server-addresses,flow"`
-	RandomInterval     int      `yaml:"randomInterval"`
-	MinElectionTimeout int      `yaml:"minElectionTimeout"`
-	Log                struct {
+	Port            int      `yaml:"port"`
+	ServerAddresses []string `yaml:"server-addresses,flow"`
+	RandomInterval  int      `yaml:"randomInterval"`
+	ElectionTimeout int      `yaml:"electionTimeout"`
+	Log             struct {
 		RequestVoteEnabled     bool `yaml:"requestVoteEnabled"`
 		AppendEntryEnabled     bool `yaml:"appendEntryEnabled"`
 		InstallSnapshotEnabled bool `yaml:"installSnapshotEnabled"`
@@ -34,12 +34,15 @@ type RaftConf struct {
 
 func ReadConf(config []byte) (*KVServiceConf, error) {
 	if nil == config || len(config) == 0 {
-		return nil, errors.New("config is nil")
+		return nil, errors.New("configuration is empty")
 	}
 	conf := &KVServiceConf{}
-	err := yaml.Unmarshal(config, conf)
 	// If one or more values cannot be decoded due to a type mismatches,
 	// decoding continues partially until the end of the YAML content,
 	// and a *yaml.TypeError is returned with details for all missed values.
-	return conf, err
+	err := yaml.Unmarshal(config, conf)
+	if err != nil {
+		return nil, err
+	}
+	return conf, nil
 }
