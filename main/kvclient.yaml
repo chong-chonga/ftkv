@@ -1,0 +1,8 @@
+# 使用KVServer时的密码，只有密码与KVServer设置的一致时才可正常使用KVServer的功能
+password: 123456
+# 请求超时时间（可选），默认为3s，如果KVServer在限定时间里没有完成请求，方法将会返回error（单位：毫秒）
+requestTimeout: 3000
+# 指定KVServer集群的ip地址+端口（必须配置），多个地址使用逗号分隔开，支持localhost
+addresses: ['localhost:8080', '127.0.0.1:8081', '127.0.0.1:8082']
+# 是否开启KVClient的日志功能
+logEnabled: true
