@@ -1,59 +1,41 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"kvraft/kvclient"
 	"kvraft/kvserver"
-	"kvraft/tool"
 	"log"
-	"strconv"
 	"time"
 )
 
-const (
-	servers    = 3
-	serverPort = 8080
-	raftPort   = 8090
-)
+//go:embed kvservice1.yaml
+var data1 []byte
 
-func getServerAddresses() []string {
-	addrs := make([]string, servers)
-	port := serverPort
-	for i := 0; i < servers; i++ {
-		addr := "localhost:" + strconv.Itoa(port)
-		addrs[i] = addr
-		port++
-	}
-	return addrs
-}
+//go:embed kvservice2.yaml
+var data2 []byte
 
-func getRaftAddresses(me int) []string {
-	addrs := make([]string, servers-1)
-	j := 0
-	for i := 0; i < servers; i++ {
-		if i == me {
-			continue
-		}
-		addrs[j] = "localhost:" + strconv.Itoa(raftPort+i)
-		j++
-	}
-	return addrs
-}
+//go:embed kvservice3.yaml
+var data3 []byte
+
+//go:embed kvclient.yaml
+var data4 []byte
 
 func main() {
-	me := 0
-	for ; me < 3; me++ {
-		s1, err := tool.MakeStorage(me)
-		if err != nil {
-			log.Fatalln(err)
-		}
-		_, err = kvserver.StartKVServer(serverPort+me, me, getRaftAddresses(me), raftPort+me, s1, 30)
-		if err != nil {
-			log.Fatalln(err)
-		}
+	_, err := kvserver.StartKVServer(data1)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	_, err = kvserver.StartKVServer(data2)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	_, err = kvserver.StartKVServer(data3)
+	if err != nil {
+		log.Fatalln(err)
 	}
 	time.Sleep(5 * time.Second)
-	client, err := kvclient.NewClient(getServerAddresses())
+	client, err := kvclient.NewClient(data4)
 	if err != nil {
 		panic(err.Error())
 	}
