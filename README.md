@@ -1,12 +1,35 @@
-# FaultTolerantKVService
++# FaultTolerantKVService
 一种具有强一致性的分布式键值对存储系统，基于raft共识算法提供一种可靠的方式来存储需要由分布式系统或机器集群访问的数据。支持Get、Put、Append、Delete四种操作。
 它可以在网络分区期间进行领导者选举，并可以容忍机器故障。Server支持grpc调用，具备密码认证、会话管理、重启恢复等特性；Client支持在备机间自动故障转移。
 
-## Background
+## 背景
 思路来源于[6.824: Distributed Systems Spring 2021](http://nil.csail.mit.edu/6.824/2021/) lab2-lab3。这两个实验实现了一个简易的raft和kvserice，
 这个raft虽然实现了论文中提到的大部分功能，如领导者选举、日志共识、日志压缩等，kvservice也能够利用raft达到强一致性和高可用，但也存在不足之处：
 raft并没有实现真正的持久化，使用的rpc也不是真正的RPC调用，kvservice不支持删除等等。怀着让kvservice成为一个真正可用的键值对存储系统的心，
 [Fault-tolerant Key/Value Service](https://github.com/chong-chonga/FaultTolerantKVService)由此而来。
+
+## 安装与使用
+### 前提条件
+请确保系统在运行前已安装1.18及以上版本的golang，安装指导文档可以参照[Download and install](https://go.dev/doc/install)。
+例如，在linux上安装1.20.1版本的golang：
+```shell
+wget https://go.dev/dl/go1.20.1.linux-amd64.tar.gz
+rm -rf /usr/local/go && tar -C /usr/local -xzf go1.20.1.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
+go version
+```
+1. 运行以下命令克隆本仓库代码
+```shell
+git clone https://github.com/chong-chonga/FaultTolerantKVService.git
+```
+2. 克隆成功后，会得到一个名为**FaultTolerantKVService**的文件夹，使用cd命令进入main文件夹
+```shell
+cd FaultTolerantKVService/main/
+```
+3. 运行以下命令后，会在本地启动三个KVServer，彼此之间使用raft算法达成共识；可通过命令行交互来测试基础功能
+```shell
+go run main.go
+```
 
 ## Problems
 在开发FT-KVServer时，存在很多问题，以下是我的思考
@@ -24,7 +47,7 @@ Raft在两种情况下要进行持久化：
 将数据写入磁盘所耗费的时间中，大多数情况下数据传输时间占比较小，寻道时间和磁盘旋转时间占了绝大部分。
 当写入数据量较小时，更应当确保数据是顺序写入的；如果要在多个不同文件写入数据，则耗费的时间可能比写入单个文件更多。但在上述两种情况中，不管是保存在单个文件还是多个文件，每次写入只会打开一个文件写入，可以认为它们的寻道时间和磁盘旋转时间是一样的，因此它们的不同点在于写入数据量的大小。因此，我选择第二种方案为raft提供持久化。
 
-这里有另外一种思路：将所有内容都保存在NVDRAM中，在DRAM电源故障时，备用电源会将数据全部保存在SSD中（就像[FaRM](https://www.youtube.com/watch?v=UoL3FGcDsE4)做的那样子）。
+如果要追求更极致的速度，可以借用[FaRM](https://www.youtube.com/watch?v=UoL3FGcDsE4)的例子，将所有内容都保存在NVDRAM中，在DRAM电源故障时，备用电源会将数据全部保存在SSD中。
 由于DRAM和SSD之间的速度差距，使用DRAM的确会非常的快；但不是每个人都能使用NVDRAM存储。 只有在非常追求性能时才能采用。
 
 ### KVServer有过滤重复的相同请求的必要吗
