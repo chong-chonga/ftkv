@@ -5,8 +5,11 @@
 ## 背景
 思路来源于[6.824: Distributed Systems Spring 2021](http://nil.csail.mit.edu/6.824/2021/) lab2-lab3。这两个实验实现了一个简易的raft和kvserice，
 这个raft虽然实现了论文中提到的大部分功能，如领导者选举、日志共识、日志压缩等，kvservice也能够利用raft达到强一致性和高可用，但也存在不足之处：
-raft并没有实现真正的持久化，使用的rpc也不是真正的RPC调用，kvservice不支持删除等等。怀着让kvservice成为一个真正可用的键值对存储系统的心，
+raft并没有实现真正的持久化，使用的rpc也不是真正的RPC调用，kvservice不支持删除等等。本着让kvservice成为一个真正可用的键值对存储系统的想法，
 [Fault-tolerant Key/Value Service](https://github.com/chong-chonga/FaultTolerantKVService)由此而来。
+
+## 系统架构
+![kvservice_diagram.jpg](kvservice_diagram.jpg)
 
 ## 安装与使用
 ### 前提条件
