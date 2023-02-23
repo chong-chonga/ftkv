@@ -3,8 +3,8 @@ package main
 import (
 	_ "embed"
 	"fmt"
-	"kvraft/kvclient"
-	"kvraft/kvserver"
+	"github.com.chongchonga/kvservice/v1/kvclient"
+	"github.com.chongchonga/kvservice/v1/kvserver"
 	"log"
 	"time"
 )

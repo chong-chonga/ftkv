@@ -1,4 +1,4 @@
-module kvraft
+module github.com.chongchonga/kvservice/v1
 
 go 1.18
 
