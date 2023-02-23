@@ -34,8 +34,9 @@ cd FaultTolerantKVService/main/
 go run main.go
 ```
 
-## Problems
-在开发FT-KVServer时，存在很多问题，以下是我的思考
+## 开发笔记
+
+在开发FT-KVService时，存在很多问题，以下是我的思考
 
 ### Raft如何持久化
 Raft在两种情况下要进行持久化：
@@ -120,7 +121,7 @@ func (kv *KVServer) startApply() {
 
 再思考深一点，如果就是想保证生成的uuid就是唯一的呢，可否用现有的Raft做到？
 
-## 客户端看到的故障模型
+## 故障模型
 KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕机等情况。KVServer对外暴露接口供客户端进行RPC调用。
 一般情况下，KVServer是以集群的形式存在的，而根据Raft共识算法，只有集群中的Leader才能处理请求。
 因此对KVServer的RPC调用在一开始很可能不会成功，所以需要对客户端进行一定的封装，才能更方便地使用KVServer。
@@ -138,7 +139,7 @@ KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕�
 1. 目前，service与raft之间的通信采用的是阻塞式的**channel**，尽管raft发送log/snapshot是由乐观锁控制的，因此raft发送和service接收的间隔内浪费了部分性能。可以采用缓冲式的
 **channel**来减少间隔的出现频率。缓冲不应该设置的太大，否则会浪费空间（时空权衡又来了），缓冲的大小应该视service处理速度与raft发送速度的差距而定。
 
-## About
+## 
 
 ### 1. 设计请求处理流程
 
@@ -267,3 +268,13 @@ func (kv *KVServer) submit(op Op) (*ApplyResult, pb.ErrCode) {
 	}
 }
 ```
+
+## 参考
+这两个课程视频对实现Raft有很大的帮助：
+1. [Lecture 6: Fault Tolerance: Raft (1)](https://www.youtube.com/watch?v=64Zp3tzNbpE&list=PLrw6a1wE39_tb2fErI4-WkMbsvGQk9_UB&index=6)
+2. [Lecture 7: Fault Tolerance: Raft (2)](https://www.youtube.com/watch?v=4r8Mz3MMivY&list=PLrw6a1wE39_tb2fErI4-WkMbsvGQk9_UB&index=7)
+
+如果想要进一步了解Raft共识算法，建议不要先看知乎或者博客，可以先看原作者[Raft lecture (Raft user study)](https://www.youtube.com/watch?v=YbZ3zDzDnrw)
+另外，想要了解Paxos共识算法，也可以看看他的[Paxos lecture (Raft user study)](https://www.youtube.com/watch?v=JEpsBg0AO6o&t=318s)；
+我的亲身经历告诉我，这篇[Paxos算法的乱七八糟讲解的博客](https://www.cnblogs.com/linbingdong/p/6253479.html)的内容和原作者的视频的内容极为相似，
+相似就算了，关键是内容有错误，看了文章后对算法本身认识就有误区，后来还是看原作者的视频才醒悟过来。
