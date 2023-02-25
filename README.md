@@ -138,18 +138,21 @@ KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕�
 ## 有哪些地方是可以改进的？
 1. 目前，service与raft之间的通信采用的是阻塞式的**channel**，尽管raft发送log/snapshot是由乐观锁控制的，因此raft发送和service接收的间隔内浪费了部分性能。可以采用缓冲式的
 **channel**来减少间隔的出现频率。缓冲不应该设置的太大，否则会浪费空间（时空权衡又来了），缓冲的大小应该视service处理速度与raft发送速度的差距而定。
-
-## 
+2. 当前的Raft实现还不支持动态配置（即Configuration Changes）；现实情况下，我们往往要移除故障机器并添加新机器，同时要求当前集群的机器能够继续工作。
+3. FaultTolerantKVService还不支持更高级别的安全保证，例如SSL认证，这个也许可以借助GRPC框架来实现。
 
 ### 1. 设计请求处理流程
 
 在处理请求方面，基于Raft的KVServer相较于传统的KVServer有很大不同。KVServer是需要等待命令达成共识才能执行请求的。
 KVServer将Client的请求包装为一个Command提交给Raft， Raft会将达成共识的KVServer通过Channel发送给KVServer。
-这里就引出了一个问题，对于每个请求，KVServer如何知晓这个请求执行是否成功呢？
-在Service向Raft提交Command时，RaftCommand包装为log，并会返回对应log的`index`和`term`；根据Raft共识算法，index和term确定了log的唯一性（阅读论文后可知）。
+这里就引出了一个问题：**对于每个请求，KVServer如何知晓这个请求执行是否成功？**
+换个说法，**如何确定从`channel`接收到的log和提交的log的对应关系？**
+Service向Raft提交Command时，Raft将Command包装为log，并会返回对应log的`index`和`term`；根据Raft共识算法，index和term确定了log的唯一性。
+![img.png](img.png)
+图片来源于[Raft lecture (Raft user study)](https://www.youtube.com/watch?v=YbZ3zDzDnrw&t=1243s)
+
 因此KVServer可以通过`index`来等待请求执行完成的`signal`，假如回传的命令的term与等待的不符，则说明等待的命令没有达成共识。
 在这里我使用的还是go中的`channel(chan)`，KVServer使用map数据结构记录等待中的`channel`（map使用方便）。
-
 KVServer处理Raft回传的Command程序如下，从applyCh接收命令，根据命令类型执行相应的操作。
 同时会判断对应`index`是否有`channel`正在等待；有的话就回传ApplyResult(包含了Term)，随后从map中删除相关记录，最后close。
 尽量减少不必要的存储。
