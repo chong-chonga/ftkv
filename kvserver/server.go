@@ -6,10 +6,10 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"github.com.chongchonga/kvservice/v1/common"
-	"github.com.chongchonga/kvservice/v1/kvserver/conf"
-	"github.com.chongchonga/kvservice/v1/raft"
-	"github.com.chongchonga/kvservice/v1/tool"
+	"github.com/kvservice/v1/common"
+	"github.com/kvservice/v1/kvserver/conf"
+	"github.com/kvservice/v1/raft"
+	"github.com/kvservice/v1/tool"
 	uuid "github.com/satori/go.uuid"
 	"google.golang.org/grpc"
 	"log"
@@ -22,6 +22,8 @@ import (
 const DefaultSessionTimeout = 60 * 60 // 1h
 
 const SessionIdSeparator = "-"
+
+const DefaultServerPort = 8080
 
 const (
 	OpenSession common.Op = -2
@@ -77,8 +79,10 @@ func StartKVServer(config []byte) (*KVServer, error) {
 		return nil, &tool.RuntimeError{Stage: "load KVService config", Err: err}
 	}
 	port := kvServerConf.Port
-	if port <= 0 {
+	if port < 0 {
 		return nil, &tool.RuntimeError{Stage: "configure KVServer", Err: errors.New("KVServer port " + strconv.Itoa(port) + " is invalid")}
+	} else if port == 0 {
+		port = DefaultServerPort
 	}
 	me := serviceConf.Me
 	storage, err := tool.MakeStorage(me)
