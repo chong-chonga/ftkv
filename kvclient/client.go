@@ -3,9 +3,9 @@ package kvclient
 import (
 	"context"
 	"errors"
-	"github.com.chongchonga/kvservice/v1/common"
-	"github.com.chongchonga/kvservice/v1/kvclient/conf"
-	"github.com.chongchonga/kvservice/v1/tool"
+	"github.com/kvservice/v1/common"
+	"github.com/kvservice/v1/kvclient/conf"
+	"github.com/kvservice/v1/tool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
