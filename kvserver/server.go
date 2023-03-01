@@ -3,7 +3,7 @@ package kvserver
 import (
 	"bytes"
 	"context"
-	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/kvservice/v1/common"
@@ -24,18 +24,6 @@ const DefaultSessionTimeout = 60 * 60 // 1h
 const SessionIdSeparator = "-"
 
 const DefaultServerPort = 8080
-
-const (
-	OpenSession common.Op = -2
-	GET         common.Op = -3
-)
-
-type Op struct {
-	OpType common.Op
-	Key    string
-	Value  string
-	UUID   string
-}
 
 type ApplyResult struct {
 	Term      int
@@ -151,7 +139,6 @@ func StartKVServer(config []byte) (*KVServer, error) {
 
 	// initialize kvserver success, start raft
 	raftConf := serviceConf.Raft
-	gob.Register(Op{})
 	kv.rf, err = raft.StartRaft(me, storage, applyCh, raftConf)
 	if err != nil {
 		_ = listener.Close()
@@ -182,18 +169,22 @@ func (kv *KVServer) logPrintf(format string, v ...interface{}) {
 }
 
 func (kv *KVServer) OpenSession(_ context.Context, request *common.OpenSessionRequest) (*common.OpenSessionReply, error) {
-	reply := &common.OpenSessionReply{}
 	kv.logPrintf("receive OpenSession request from client")
+	reply := &common.OpenSessionReply{}
 	reply.SessionId = ""
+	if request.RequestType != common.RequestType_OPEN_SESSION {
+		reply.ErrCode = common.ErrCode_INVALID_REQUEST_TYPE
+		return reply, nil
+	}
 	if request.GetPassword() != kv.password {
 		reply.ErrCode = common.ErrCode_INVALID_PASSWORD
 		return reply, nil
 	}
-	command := Op{
-		OpType: OpenSession,
-		Key:    "",
-		Value:  "",
-		UUID:   uuid.NewV4().String(),
+	command := raft.Op{
+		RequestType: common.RequestType_OPEN_SESSION,
+		Key:         "",
+		Value:       "",
+		UUID:        uuid.NewV4().String(),
 	}
 	applyResult, errCode := kv.submit(command)
 	if errCode == common.ErrCode_OK {
@@ -209,10 +200,14 @@ func (kv *KVServer) OpenSession(_ context.Context, request *common.OpenSessionRe
 }
 
 func (kv *KVServer) Get(_ context.Context, args *common.GetRequest) (*common.GetReply, error) {
-	reply := &common.GetReply{}
 	key := args.Key
 	sessionId := args.SessionId
 	kv.logPrintf("receive Get request from client, key=%s, sessionId=%s, ", key, sessionId)
+	reply := &common.GetReply{}
+	if args.RequestType != common.RequestType_GET {
+		reply.ErrCode = common.ErrCode_INVALID_REQUEST_TYPE
+		return reply, nil
+	}
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.ErrCode = common.ErrCode_WRONG_LEADER
@@ -222,10 +217,10 @@ func (kv *KVServer) Get(_ context.Context, args *common.GetRequest) (*common.Get
 		reply.ErrCode = common.ErrCode_INVALID_SESSION
 		return reply, nil
 	}
-	command := Op{
-		OpType: GET,
-		Key:    args.Key,
-		Value:  "",
+	command := raft.Op{
+		RequestType: common.RequestType_GET,
+		Key:         args.Key,
+		Value:       "",
 	}
 	_, errCode := kv.submit(command)
 	if errCode == common.ErrCode_OK {
@@ -249,10 +244,14 @@ func (kv *KVServer) Get(_ context.Context, args *common.GetRequest) (*common.Get
 }
 
 func (kv *KVServer) Update(_ context.Context, args *common.UpdateRequest) (*common.UpdateReply, error) {
-	reply := &common.UpdateReply{}
 	sessionId := args.SessionId
-	op := args.Op
-	kv.logPrintf("receive %s request from client, sessionId=%s", op, sessionId)
+	reqType := args.RequestType
+	kv.logPrintf("receive %s request from client, sessionId=%s", reqType, sessionId)
+	reply := &common.UpdateReply{}
+	if reqType != common.RequestType_PUT && reqType != common.RequestType_APPEND && reqType != common.RequestType_DELETE {
+		reply.ErrCode = common.ErrCode_INVALID_REQUEST_TYPE
+		return reply, nil
+	}
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.ErrCode = common.ErrCode_WRONG_LEADER
@@ -263,23 +262,19 @@ func (kv *KVServer) Update(_ context.Context, args *common.UpdateRequest) (*comm
 		return reply, nil
 	}
 
-	if op != common.Op_PUT && op != common.Op_APPEND && op != common.Op_DELETE {
-		reply.ErrCode = common.ErrCode_INVALID_OP
-		return reply, nil
-	}
 	key := args.Key
 	value := args.Value
-	command := Op{
-		OpType: op,
-		Key:    key,
-		Value:  value,
+	command := raft.Op{
+		RequestType: reqType,
+		Key:         key,
+		Value:       value,
 	}
 	_, errCode := kv.submit(command)
 	reply.ErrCode = errCode
 	if errCode == common.ErrCode_OK {
-		kv.logPrintf("%s request finished, key=%s, value=%s, errCode=%s, sessionId=%s", op, key, value, errCode.String(), sessionId)
+		kv.logPrintf("%s request finished, key=%s, value=%s, errCode=%s, sessionId=%s", reqType, key, value, errCode.String(), sessionId)
 	} else {
-		kv.logPrintf("%s fail to finish, key=%s, value=%s, errCode=%s, sessionId=%s", op, key, value, errCode.String(), sessionId)
+		kv.logPrintf("%s fail to finish, key=%s, value=%s, errCode=%s, sessionId=%s", reqType, key, value, errCode.String(), sessionId)
 	}
 	return reply, nil
 }
@@ -300,7 +295,7 @@ func (kv *KVServer) checkSession(sessionId string) bool {
 // If the submitted command reaches consensus successfully, the pointer points to the corresponding ApplyResult will be returned;
 // and the pb.ErrCode is pb.ErrCode_OK
 // otherwise, the returned *ApplyResult would be nil and the ErrCode indicating the reason why the command fails to complete
-func (kv *KVServer) submit(op Op) (*ApplyResult, common.ErrCode) {
+func (kv *KVServer) submit(op raft.Op) (*ApplyResult, common.ErrCode) {
 	// start时，不应当持有锁，因为这会阻塞 KVServer 接收来自 raft 的 log
 	// start的命令的返回值的唯一性已经由 raft 的互斥锁保证
 	commandIndex, commandTerm, isLeader := kv.rf.Start(op)
@@ -333,7 +328,8 @@ func (kv *KVServer) submit(op Op) (*ApplyResult, common.ErrCode) {
 
 func (kv *KVServer) makeSnapshot() ([]byte, error) {
 	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
+	//e := gob.NewEncoder(w)
+	e := json.NewEncoder(w)
 	err := e.Encode(kv.uniqueId)
 	if err != nil {
 		return nil, errors.New("encode uniqueId fails: " + err.Error())
@@ -354,7 +350,7 @@ func (kv *KVServer) recoverFrom(snapshot []byte) error {
 		return nil
 	}
 	r := bytes.NewBuffer(snapshot)
-	d := gob.NewDecoder(r)
+	d := json.NewDecoder(r)
 	var tab map[string]string
 	var nextClientId int64
 	var commitIndex int
@@ -390,27 +386,27 @@ func (kv *KVServer) apply() {
 				continue
 			}
 			kv.commitIndex = commandIndex
-			op := msg.Command.(Op)
-			commandType := op.OpType
+			op := msg.Command
+			commandType := op.RequestType
 			sessionId := ""
-			if OpenSession == commandType {
+			if common.RequestType_OPEN_SESSION == commandType {
 				sessionId = strconv.FormatInt(kv.uniqueId, 10) + SessionIdSeparator + op.UUID
 				kv.sessionMap[sessionId] = time.Now()
 				kv.uniqueId++
 				kv.logPrintf("open a new session, sessionId=%s", sessionId)
-			} else if common.Op_PUT == commandType {
+			} else if common.RequestType_PUT == commandType {
 				kv.tab[op.Key] = op.Value
 				kv.logPrintf("put value %s on key=%v", op.Value, op.Key)
-			} else if common.Op_APPEND == commandType {
+			} else if common.RequestType_APPEND == commandType {
 				v := kv.tab[op.Key]
 				v += op.Value
 				kv.tab[op.Key] = v
 				kv.logPrintf("append value %s on key=%s, now value is %s", op.Value, op.Key, v)
-			} else if common.Op_DELETE == commandType {
+			} else if common.RequestType_DELETE == commandType {
 				delete(kv.tab, op.Key)
 				kv.logPrintf("delete key=%v", op.Key)
-			} else if GET != commandType {
-				log.Printf("warning: receive unknown request type, opType=%s", op.OpType)
+			} else if common.RequestType_GET != commandType {
+				log.Printf("warning: receive unknown request type, opType=%s", op.RequestType)
 			}
 			if ch, _ := kv.replyChan[commandIndex]; ch != nil {
 				kv.logPrintf("send apply result to commandIndex=%d, commandTerm=%d", commandIndex, commandTerm)

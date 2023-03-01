@@ -2,7 +2,7 @@ package raft
 
 import (
 	"bytes"
-	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"github.com/kvservice/v1/kvserver/conf"
 	"github.com/kvservice/v1/tool"
@@ -37,7 +37,7 @@ const (
 //
 type ApplyMsg struct {
 	CommandValid bool
-	Command      interface{}
+	Command      Op
 	CommandIndex int
 	CommandTerm  int
 
@@ -50,7 +50,7 @@ type ApplyMsg struct {
 // LogEntry describes an abstract command
 type LogEntry struct {
 	Term    int
-	Command interface{}
+	Command Op
 }
 
 // Raft
@@ -141,8 +141,7 @@ func StartRaft(me int, storage *tool.Storage, applyCh chan ApplyMsg, conf conf.R
 		rf.votedFor = -1
 		var logEntries = make([]LogEntry, 1)
 		logEntries[0] = LogEntry{
-			Term:    0,
-			Command: nil,
+			Term: 0,
 		}
 		rf.log = logEntries
 		rf.lastIncludedIndex = -1
@@ -245,7 +244,7 @@ func (rf *Raft) logPersistence(format string, v ...interface{}) {
 
 func (rf *Raft) makeRaftState() ([]byte, error) {
 	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
+	e := json.NewEncoder(w)
 	err := e.Encode(rf.currentTerm)
 	if err != nil {
 		return nil, errors.New("encode currentTerm fails: " + err.Error())
@@ -275,8 +274,7 @@ func (rf *Raft) recoverFrom(state []byte) error {
 		return nil
 	}
 	buf := bytes.NewBuffer(state)
-	d := gob.NewDecoder(buf)
-
+	d := json.NewDecoder(buf)
 	var currentTerm int
 	var votedFor int
 	var logEntries []LogEntry
@@ -378,7 +376,7 @@ func (rf *Raft) applyLog() {
 // term. the third return value is true if this server believes it is
 // the Leader.
 //
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
+func (rf *Raft) Start(command Op) (int, int, bool) {
 	index := -1
 	term := -1
 	rf.mu.Lock()
