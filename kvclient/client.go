@@ -118,7 +118,8 @@ func (c *KVClient) openSession() error {
 	server := c.chooseServer()
 	password := c.password
 	args := &common.OpenSessionRequest{
-		Password: password,
+		Password:    password,
+		RequestType: common.RequestType_OPEN_SESSION,
 	}
 	serverCount := len(c.rpcClients)
 	for i := 0; i < serverCount; i++ {
@@ -166,8 +167,9 @@ func (c *KVClient) Get(key string) (string, bool, error) {
 	}
 	sessionId := c.sessionId
 	args := common.GetRequest{
-		Key:       key,
-		SessionId: sessionId,
+		Key:         key,
+		SessionId:   sessionId,
+		RequestType: common.RequestType_GET,
 	}
 
 	server := c.chooseServer()
@@ -227,7 +229,7 @@ func (c *KVClient) Get(key string) (string, bool, error) {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 //
-func (c *KVClient) update(key string, value string, op common.Op) error {
+func (c *KVClient) update(key string, value string, op common.RequestType) error {
 	var err error
 	if !c.sessionValid {
 		err = c.openSession()
@@ -237,10 +239,10 @@ func (c *KVClient) update(key string, value string, op common.Op) error {
 	}
 	sessionId := c.sessionId
 	args := common.UpdateRequest{
-		Key:       key,
-		Value:     value,
-		Op:        op,
-		SessionId: sessionId,
+		Key:         key,
+		Value:       value,
+		RequestType: op,
+		SessionId:   sessionId,
 	}
 	server := c.chooseServer()
 	serverCount := len(c.rpcClients)
@@ -282,11 +284,11 @@ func (c *KVClient) update(key string, value string, op common.Op) error {
 }
 
 func (c *KVClient) Put(key string, value string) error {
-	return c.update(key, value, common.Op_PUT)
+	return c.update(key, value, common.RequestType_PUT)
 }
 func (c *KVClient) Append(key string, value string) error {
-	return c.update(key, value, common.Op_APPEND)
+	return c.update(key, value, common.RequestType_APPEND)
 }
 func (c *KVClient) Delete(key string) error {
-	return c.update(key, "", common.Op_DELETE)
+	return c.update(key, "", common.RequestType_DELETE)
 }
