@@ -13,18 +13,21 @@ enum ErrCode {
     OK = 1;
     NO_KEY = 2;
     INVALID_SESSION = 3;
-    INVALID_OP = 4;
+    INVALID_REQUEST_TYPE = 4;
     INVALID_PASSWORD = 5;
 }
 
-enum Op {
-    PUT = 0;
-    APPEND = 1;
-    DELETE = 2;
+enum RequestType {
+    OPEN_SESSION = 0;
+    GET= 1;
+    PUT = 2;
+    APPEND = 3;
+    DELETE = 4;
 }
 
 message OpenSessionRequest {
     string password = 1;
+    RequestType request_type = 2;
 }
 
 message OpenSessionReply {
@@ -35,7 +38,7 @@ message OpenSessionReply {
 message UpdateRequest {
     string key = 1;
     string value = 2;
-    Op op = 3;               // "Put" or "Append" or "Delete"
+    RequestType request_type = 3;
     string session_id = 4;
 }
 
@@ -46,6 +49,7 @@ message UpdateReply {
 message GetRequest {
     string key = 1;
     string session_id = 2;
+    RequestType request_type = 3;
 }
 
 message GetReply {
