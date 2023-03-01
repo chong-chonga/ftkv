@@ -151,6 +151,44 @@ Service向Raft提交Command时，Raft将Command包装为log，并会返回对应
 ![img.png](img.png)
 图片来源于[Raft lecture (Raft user study)](https://www.youtube.com/watch?v=YbZ3zDzDnrw&t=1243s)
 
+**为什么index和term就可以确定唯一的log呢？**
+
+因为follower在收到leader的AppendEntries RPC进行日志复制时，会检查PrevLogIndex处的log的term与leader的是否一致；
+如果不一致，follower将会拒绝本次的请求，leader会根据follower回传的信息，选择是发送快照还是将PrevLogIndex减小。
+具体可看下面这段Raft代码：
+```go
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
+	idx := 0
+	i := 0
+	//prevLogIndex := args.PrevLogIndex - rf.lastIncludedIndex - 1
+	offset := args.PrevLogIndex - rf.lastIncludedIndex
+	if offset > 0 {
+		/// offset > 0：需要比较第 offset 个 log 的 term，这里减1是为了弥补数组索引，lastIncludedIndex 初始化为 -1 也是如此
+		offset -= 1
+		// if term of log entry in prevLogIndex not match prevLogTerm
+		// set XTerm to term of the log
+		// set XIndex to the first entry in XTerm
+		// reply false (§5.3)
+		if rf.log[offset].Term != args.PrevLogTerm {
+			reply.XTerm = rf.log[offset].Term
+			for offset > 0 {
+				if rf.log[offset-1].Term != reply.XTerm {
+					break
+				}
+				offset--
+			}
+			reply.XIndex = offset + rf.lastIncludedIndex + 1
+			rf.resetTimeout()
+			return nil
+		}
+		// match, set i to prevLogIndex + 1, prepare for comparing the following logs
+		i = offset + 1
+	} else {
+		// offset <= 0：说明log在snapshot中，则令idx加上偏移量，比较idx及其之后的log
+		idx -= offset
+	}
+}
+```
 因此KVServer可以通过`index`来等待请求执行完成的`signal`，假如回传的命令的term与等待的不符，则说明等待的命令没有达成共识。
 在这里我使用的还是go中的`channel(chan)`，KVServer使用map数据结构记录等待中的`channel`（map使用方便）。
 KVServer处理Raft回传的Command程序如下，从applyCh接收命令，根据命令类型执行相应的操作。
