@@ -45,8 +45,10 @@ Raft在两种情况下要进行持久化：
    这两种操作都必须是原子的且必须等待数据真正写入到磁盘，尤其是第二种操作，必须保证raft state和snapshot是一致的。
    既然有两种数据需要持久化，因此就引出了另一个问题。
    将数据保存在一个文件还是多个文件？
+
    ● 单个文件：将raft state和snapshot一起存储，就能保证每次写入的原子性，不用担心部分文件写入过程中崩溃，从而导致多个文件保存的数据不一致。缺点就是单次写入的数据量增多，因为每次持久化都要写入snapshot；当snapshot很大时且写入频繁时，写入开销会很大，因此要控制snapshot的大小。
-   ● 多个文件：只持久化raft state时，写入一个文件；同时持久化raft state和snapshot时，写入另一个文件；为了确定两个文件中的raft state哪个更新，可以使用在写入时使用版本号来进行标识。这样写入的好处是避免写入不必要的数据，snapshot的大小不会影响 raft state的写入速度。缺点就是，增大了持久化的复杂度，且读取raft state时要读取两个文件才能确定哪个raft state的版本更大。
+
+   ● 多个文件：只持久化raft state时，写入一个文件；同时持久化raft state和snapshot时，写入另一个文件；为了确定两个文件中的raft state哪个是更新的（up-to-date），可以使用在写入时使用版本号来进行标识。这样写入的好处是避免写入不必要的数据，snapshot的大小不会影响 raft state的写入速度。缺点就是，增大了持久化的复杂度，且读取raft state时要读取两个文件才能确定哪个raft state的版本更大。
 
 将数据写入磁盘所耗费的时间中，大多数情况下数据传输时间占比较小，寻道时间和磁盘旋转时间占了绝大部分。
 当写入数据量较小时，更应当确保数据是顺序写入的；如果要在多个不同文件写入数据，则耗费的时间可能比写入单个文件更多。但在上述两种情况中，不管是保存在单个文件还是多个文件，每次写入只会打开一个文件写入，可以认为它们的寻道时间和磁盘旋转时间是一样的，因此它们的不同点在于写入数据量的大小。因此，我选择第二种方案为raft提供持久化。
@@ -91,18 +93,19 @@ func (kv *KVServer) startApply() {
 
 ### 如何验证客户端的身份
 
-- **背景**：我们不希望自己的KVServer被随意访问，因此想要给KVServer加上一层认证措施，只有符合条件的客户端的请求才能被处理。
+- **起因**：我们不希望自己的KVServer被随意访问，因此想要给KVServer加上一层认证措施，只有符合条件的客户端的请求才能被处理。
   这里当然会想到给KVServer设置密码，只有客户端提供正确的密码后，才是通过认证的客户端。
   在通过认证后，分配给客户端一个唯一的标识；客户端后续请求时就携带上这个标识，表明客户端已经通过认证了（因为不希望每次请求都要携带上密码）。
   参照Redis这样的设置，将密码保存在一个配置文件中，KVServer启动时就读取配置文件里保存的密码，并将其与客户端提供的密码进行核对。
-- **问题**：标识应当无规律，难以通过暴力尝试手段得到正确的标识。怎样确保生成的客户端标识的是分布式唯一的？
+- **需求**：标识应当无规律，难以通过暴力尝试手段得到正确的标识，还需要确保生成的客户端标识的是分布式唯一的。
 - **思路**：B/S架构下的SessionId是一个参考，可以考虑给每个通过认证的Client生成一个唯一的SessionId(随机串，比如uuid)，根据客户端提供的SessionId参数来验证会话的有效性。
   但是在分布式情境下，即使是基于时间戳并在同一台机器上生成uuid，也是有重复的可能。一般采用的策略是是选择**雪花算法（SnowFlake）**，亦或者利用分布式锁来生成。
-  基于Raft提供的强一致性保证，可以在集群中生成一个唯一的int64整数。我们可以将这个整数作为SessionId的前缀，uuid作为SessionId的后缀。
+  基于Raft提供的强一致性保证，我们可以对标识达成共识，但标识是有可能重复的。可以选择对后续重复的标识回传一个结果，以指示该标识重复，需要重新生成，但这样做会浪费一次
+  共识所需的时间。不妨换个思路，利用共识在集群中生成一个唯一的int64整数。我们可以将这个整数作为SessionId的前缀，uuid作为SessionId的后缀。
   而者通过非数字字符相连组成SessionId。 这样生成的uuid发生重复也是没关系的，因为前缀必定是不同的。
 
 #### 细节问题：记录SessionId的数据需要持久化吗(写入到快照)?
-可以不持久化，也就是说，Server对SessionId的记录是可以丢失的。
+可以不持久化，也就是说，Server对SessionId的记录是可以丢失的，下面是我的理解：
 
 **首先考虑单Server的情况：**
 当Server崩溃重启时，会读取log并重放，因此Client与Server通信会出现以下几种情况：
@@ -139,9 +142,34 @@ KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕�
 1. 目前，service与raft之间的通信采用的是阻塞式的**channel**，尽管raft发送log/snapshot是由乐观锁控制的，因此raft发送和service接收的间隔内浪费了部分性能。可以采用缓冲式的
 **channel**来减少间隔的出现频率。缓冲不应该设置的太大，否则会浪费空间（时空权衡又来了），缓冲的大小应该视service处理速度与raft发送速度的差距而定。
 2. 当前的Raft实现还不支持动态配置（即Configuration Changes）；现实情况下，我们往往要移除故障机器并添加新机器，同时要求当前集群的机器能够继续工作。
-3. FaultTolerantKVService还不支持更高级别的安全保证，例如SSL认证，这个也许可以借助GRPC框架来实现。
+3. 不支持动态调整后台任务执行频率（如Raft是每秒执行10次log commit），Redis Server能根据客户端数量和配置的频率数动态确定后台任务执行频率
+Redis5.0的[server.c](https://github.com/redis/redis/blob/5.0/src/server.c)文件中的`serverCron`方法能够根据`clients`和配置的`config_hz`
+共同确定`dynamic_hz`：
+```c
+int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
+    /* Update the time cache. */
+    updateCachedTime(1);
 
-### 1. 设计请求处理流程
+    server.hz = server.config_hz;
+    /* Adapt the server.hz value to the number of configured clients. If we have
+     * many clients, we want to call serverCron() with an higher frequency. */
+    if (server.dynamic_hz) {
+        while (listLength(server.clients) / server.hz >
+               MAX_CLIENTS_PER_CLOCK_TICK)
+        {
+            server.hz *= 2;
+            if (server.hz > CONFIG_MAX_HZ) {
+                server.hz = CONFIG_MAX_HZ;
+                break;
+            }
+        }
+    }
+}
+```
+
+## 实践思想
+
+### 1. 将客户端的请求与raft的log对应
 
 在处理请求方面，基于Raft的KVServer相较于传统的KVServer有很大不同。KVServer是需要等待命令达成共识才能执行请求的。
 KVServer将Client的请求包装为一个Command提交给Raft， Raft会将达成共识的KVServer通过Channel发送给KVServer。
@@ -309,6 +337,169 @@ func (kv *KVServer) submit(op Op) (*ApplyResult, pb.ErrCode) {
 	}
 }
 ```
+
+### 2. 原子性持久化
+
+[Lab 1: MapReduce](http://nil.csail.mit.edu/6.824/2021/labs/lab-mr.html)中，**Worker**的`map`和`reduce`操作的最后需要将数据持久化，
+持久化的流程如下：
+1. 创建临时文件
+2. 将数据写入临时文件
+3. 使用系统调用`Rename`将临时文件重命名为目标文件
+
+这种处理流程可以保证覆写是原子性的，可以保证对单个文件的写入是原子操作。其实，常用的KV数据库-**Redis**的`RDB`持久化也是这样做的， RDB持久化的代码（5.0）版本在
+[rdb.c](https://github.com/redis/redis/blob/5.0/src/rdb.c)文件中，`rdbSave`源码如下：
+```c
+/* Save the DB on disk. Return C_ERR on error, C_OK on success. */
+int rdbSave(char *filename, rdbSaveInfo *rsi) {
+    char tmpfile[256];
+    char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
+    FILE *fp;
+    rio rdb;
+    int error = 0;
+
+    snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
+    fp = fopen(tmpfile,"w");
+    if (!fp) {
+        char *cwdp = getcwd(cwd,MAXPATHLEN);
+        serverLog(LL_WARNING,
+            "Failed opening the RDB file %s (in server root dir %s) "
+            "for saving: %s",
+            filename,
+            cwdp ? cwdp : "unknown",
+            strerror(errno));
+        return C_ERR;
+    }
+
+    rioInitWithFile(&rdb,fp);
+
+    if (server.rdb_save_incremental_fsync)
+        rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
+
+    if (rdbSaveRio(&rdb,&error,RDB_SAVE_NONE,rsi) == C_ERR) {
+        errno = error;
+        goto werr;
+    }
+
+    /* Make sure data will not remain on the OS's output buffers */
+    if (fflush(fp) == EOF) goto werr;
+    if (fsync(fileno(fp)) == -1) goto werr;
+    if (fclose(fp) == EOF) goto werr;
+
+    /* Use RENAME to make sure the DB file is changed atomically only
+     * if the generate DB file is ok. */
+    if (rename(tmpfile,filename) == -1) {
+        char *cwdp = getcwd(cwd,MAXPATHLEN);
+        serverLog(LL_WARNING,
+            "Error moving temp DB file %s on the final "
+            "destination %s (in server root dir %s): %s",
+            tmpfile,
+            filename,
+            cwdp ? cwdp : "unknown",
+            strerror(errno));
+        unlink(tmpfile);
+        return C_ERR;
+    }
+
+    serverLog(LL_NOTICE,"DB saved on disk");
+    server.dirty = 0;
+    server.lastsave = time(NULL);
+    server.lastbgsave_status = C_OK;
+    return C_OK;
+
+werr:
+    serverLog(LL_WARNING,"Write error saving DB on disk: %s", strerror(errno));
+    fclose(fp);
+    unlink(tmpfile);
+    return C_ERR;
+}
+```
+从这段源码可以看出，Redis的RDB持久化也是先创建一个临时文件，随后调用`rioInitWithFile`初始化`rio`，并根据配置判断是否开启自动刷盘。
+然后会调用`rdbSaveRio`执行具体的数据持久化操作，随后将数据刷新到磁盘上并关闭该文件；最后调用`rename`将文件命令重命名为默认为**dump.rdb**。
+
+因此[FaultTolerantKVService](https://github.com/chong-chonga/FaultTolerantKVService)持久化`raft state`和`snapshot`也是使用了这样的方式。
+
+Raft在两种情况下要进行持久化：
+1. raft本身状态发生改变时，持久化raft state，较为频繁
+2. raft安装snapshot时（快照），持久化raft state 和 snapshot，相对较少
+   这两种操作都必须是原子的且必须等待数据真正写入到磁盘，尤其是第二种操作，必须保证raft state和snapshot是一致的。
+
+
+既然有两种数据需要持久化，因此就引出了另一个问题：将数据保存在一个文件还是多个文件？
+
+● 单个文件：将raft state和snapshot一起存储，就能保证每次写入的原子性，不用担心部分文件写入过程中崩溃，从而导致多个文件保存的数据不一致。缺点就是单次写入的数据量增多，因为每次持久化都要写入snapshot；当snapshot很大时且写入频繁时，写入开销会很大，因此要控制snapshot的大小。
+● 多个文件：只持久化raft state时，写入一个文件；同时持久化raft state和snapshot时，写入另一个文件；为了确定两个文件中的raft state哪个更新，可以使用在写入时使用版本号来进行标识。这样写入的好处是避免写入不必要的数据，snapshot的大小不会影响 raft state的写入速度。缺点就是，增大了持久化的复杂度，且读取raft state时要读取两个文件才能确定哪个raft state的版本更大。
+
+将数据写入磁盘所耗费的时间中，大多数情况下数据传输时间占比较小，寻道时间和磁盘旋转时间占了绝大部分。
+当写入数据量较小时，更应当确保数据是顺序写入的；如果要在多个不同文件写入数据，则耗费的时间可能比写入单个文件更多。但在上述两种情况中，不管是保存在单个文件还是多个文件，每次写入只会打开一个文件写入，可以认为它们的寻道时间和磁盘旋转时间是一样的，因此它们的不同点在于写入数据量的大小。因此，我选择第二种方案为raft提供持久化。
+以持久化`raft state`和`snapshot`为例，其持久化代码如下：
+```go
+type errWriter struct {
+file *os.File
+e    error
+wr   *bufio.Writer
+}
+
+func newErrWriter(file *os.File) *errWriter {
+return &errWriter{
+file: file,
+wr:   bufio.NewWriter(file),
+}
+}
+
+func (ew *errWriter) write(p []byte) {
+if ew.e == nil {
+_, ew.e = ew.wr.Write(p)
+}
+}
+
+func (ew *errWriter) writeString(s string) {
+if ew.e == nil {
+_, ew.e = ew.wr.WriteString(s)
+}
+
+// SaveStateAndSnapshot save both Raft state and K/V snapshot as a single atomic action
+// to keep them consistent.
+func (ps *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
+	tmpFile, err := os.CreateTemp("", "raft*.rfs")
+	if err != nil {
+		return &StorageError{Op: "save", Target: "raft state and snapshot", Err: err}
+	}
+	writer := newErrWriter(tmpFile)
+	writer.writeString(fileHeader)
+	ps.writeRaftState(writer, state)
+	ps.writeSnapshot(writer, snapshot)
+	err = writer.atomicOverwrite(ps.snapshotPath)
+	if err != nil {
+		return &StorageError{Op: "save", Target: "raft state and snapshot", Err: err}
+	}
+	ps.raftState = clone(state)
+	ps.snapshot = clone(snapshot)
+	return nil
+}
+
+func (ps *Storage) writeRaftState(writer *errWriter, state []byte) {
+	writer.writeString(strconv.FormatInt(ps.nextRaftStateVersion, 10) + "\t")
+	raftStateSize := len(state)
+	writer.writeString(strconv.Itoa(raftStateSize) + "\t")
+	if raftStateSize > 0 {
+		writer.write(state)
+	}
+	ps.nextRaftStateVersion++
+}
+
+func (ps *Storage) writeSnapshot(writer *errWriter, snapshot []byte) {
+	snapshotSize := len(snapshot)
+	writer.writeString(strconv.Itoa(snapshotSize) + "\t")
+	if snapshotSize > 0 {
+		writer.write(snapshot)
+	}
+}
+```
+`SaveStateAndSnapshot`方法也是先创建一个临时文件，先写入文件头"RAFT"，然后写入`raft state`的大小、版本号、数据，再写入`snapshot`的大小、数据；
+最后，将数据刷新到磁盘上，最后再使用`os.Reanme`将临时文件重命名为目标文件名。
+
+在这个持久化过程中，每次写入都有可能返回`error`，因此将`Writer`包装为`errWriter`，可以将错误留到最后时处理，而不用每次写入都需要对错误进行判断。
+这个处理错误的思想来源于go官方的blog：[errors-are-values](https://go.dev/blog/errors-are-values)。
 
 ## 参考
 这两个课程视频对实现Raft有很大的帮助：
