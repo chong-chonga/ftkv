@@ -38,24 +38,6 @@ go run main.go
 
 在开发FT-KVService时，存在很多问题，以下是我的思考
 
-### Raft如何持久化
-Raft在两种情况下要进行持久化：
-1. raft本身状态发生改变时，持久化raft state，较为频繁
-2. raft安装snapshot时（快照），持久化raft state 和 snapshot，相对较少
-   这两种操作都必须是原子的且必须等待数据真正写入到磁盘，尤其是第二种操作，必须保证raft state和snapshot是一致的。
-   既然有两种数据需要持久化，因此就引出了另一个问题。
-   将数据保存在一个文件还是多个文件？
-
-   ● 单个文件：将raft state和snapshot一起存储，就能保证每次写入的原子性，不用担心部分文件写入过程中崩溃，从而导致多个文件保存的数据不一致。缺点就是单次写入的数据量增多，因为每次持久化都要写入snapshot；当snapshot很大时且写入频繁时，写入开销会很大，因此要控制snapshot的大小。
-
-   ● 多个文件：只持久化raft state时，写入一个文件；同时持久化raft state和snapshot时，写入另一个文件；为了确定两个文件中的raft state哪个是更新的（up-to-date），可以使用在写入时使用版本号来进行标识。这样写入的好处是避免写入不必要的数据，snapshot的大小不会影响 raft state的写入速度。缺点就是，增大了持久化的复杂度，且读取raft state时要读取两个文件才能确定哪个raft state的版本更大。
-
-将数据写入磁盘所耗费的时间中，大多数情况下数据传输时间占比较小，寻道时间和磁盘旋转时间占了绝大部分。
-当写入数据量较小时，更应当确保数据是顺序写入的；如果要在多个不同文件写入数据，则耗费的时间可能比写入单个文件更多。但在上述两种情况中，不管是保存在单个文件还是多个文件，每次写入只会打开一个文件写入，可以认为它们的寻道时间和磁盘旋转时间是一样的，因此它们的不同点在于写入数据量的大小。因此，我选择第二种方案为raft提供持久化。
-
-如果要追求更极致的速度，可以借用[FaRM](https://www.youtube.com/watch?v=UoL3FGcDsE4)的例子，将所有内容都保存在NVDRAM中，在DRAM电源故障时，备用电源会将数据全部保存在SSD中。
-由于DRAM和SSD之间的速度差距，使用DRAM的确会非常的快；但不是每个人都能使用NVDRAM存储。 只有在非常追求性能时才能采用。
-
 ### KVServer有过滤重复的相同请求的必要吗
 [lab3](http://nil.csail.mit.edu/6.824/2021/labs/lab-kvraft.html)是进行了一些假设的，例如一个客户端一次只会发送一个请求、假如命令迟迟没有达成共识，客户端会一直等待下去。
 基于这个假设，KVServer就需要过滤客户端相同且重复的请求。为此，可以使用ClientId+RequestId来标记客户端的请求。
@@ -427,34 +409,68 @@ Raft在两种情况下要进行持久化：
 既然有两种数据需要持久化，因此就引出了另一个问题：将数据保存在一个文件还是多个文件？
 
 ● 单个文件：将raft state和snapshot一起存储，就能保证每次写入的原子性，不用担心部分文件写入过程中崩溃，从而导致多个文件保存的数据不一致。缺点就是单次写入的数据量增多，因为每次持久化都要写入snapshot；当snapshot很大时且写入频繁时，写入开销会很大，因此要控制snapshot的大小。
+
 ● 多个文件：只持久化raft state时，写入一个文件；同时持久化raft state和snapshot时，写入另一个文件；为了确定两个文件中的raft state哪个更新，可以使用在写入时使用版本号来进行标识。这样写入的好处是避免写入不必要的数据，snapshot的大小不会影响 raft state的写入速度。缺点就是，增大了持久化的复杂度，且读取raft state时要读取两个文件才能确定哪个raft state的版本更大。
 
 将数据写入磁盘所耗费的时间中，大多数情况下数据传输时间占比较小，寻道时间和磁盘旋转时间占了绝大部分。
 当写入数据量较小时，更应当确保数据是顺序写入的；如果要在多个不同文件写入数据，则耗费的时间可能比写入单个文件更多。但在上述两种情况中，不管是保存在单个文件还是多个文件，每次写入只会打开一个文件写入，可以认为它们的寻道时间和磁盘旋转时间是一样的，因此它们的不同点在于写入数据量的大小。因此，我选择第二种方案为raft提供持久化。
-以持久化`raft state`和`snapshot`为例，其持久化代码如下：
+如果要追求更极致的速度，可以借用[FaRM](https://www.youtube.com/watch?v=UoL3FGcDsE4)的例子，将所有内容都保存在NVDRAM中，在DRAM电源故障时，备用电源会将数据全部保存在SSD中。
+由于DRAM和SSD之间的速度差距，使用DRAM的确会非常的快；但不是每个人都能使用NVDRAM存储。 只有在非常追求性能时才能采用。
+持久化`raft state`和`snapshot`的代码如下：
 ```go
 type errWriter struct {
-file *os.File
-e    error
-wr   *bufio.Writer
+	file *os.File
+	e    error
+	wr   *bufio.Writer
 }
 
 func newErrWriter(file *os.File) *errWriter {
-return &errWriter{
-file: file,
-wr:   bufio.NewWriter(file),
-}
+	return &errWriter{
+		file: file,
+		wr:   bufio.NewWriter(file),
+	}
 }
 
 func (ew *errWriter) write(p []byte) {
-if ew.e == nil {
-_, ew.e = ew.wr.Write(p)
-}
+	if ew.e == nil {
+		_, ew.e = ew.wr.Write(p)
+	}
 }
 
 func (ew *errWriter) writeString(s string) {
-if ew.e == nil {
-_, ew.e = ew.wr.WriteString(s)
+	if ew.e == nil {
+		_, ew.e = ew.wr.WriteString(s)
+	}
+}
+
+func clone(data []byte) []byte {
+	d := make([]byte, len(data))
+	copy(d, data)
+	return d
+}
+
+// atomicOverwrite write the buffered data to disk and overwrite the file corresponding to the path
+func (ew *errWriter) atomicOverwrite(path string) error {
+	err := ew.e
+	if err != nil {
+		return err
+	}
+	err = ew.wr.Flush()
+	if err != nil {
+		return err
+	}
+	err = ew.file.Sync()
+	if err != nil {
+		return err
+	}
+	// close will return an error if it has already been called, ignore
+	_ = ew.file.Close()
+	err = os.Rename(ew.file.Name(), path)
+	if err != nil {
+		// deletion failure will not affect, just ignore
+		_ = os.Remove(ew.file.Name())
+	}
+	return err
 }
 
 // SaveStateAndSnapshot save both Raft state and K/V snapshot as a single atomic action
@@ -501,6 +517,20 @@ func (ps *Storage) writeSnapshot(writer *errWriter, snapshot []byte) {
 在这个持久化过程中，每次写入都有可能返回`error`，因此将`Writer`包装为`errWriter`，可以将错误留到最后时处理，而不用每次写入都需要对错误进行判断。
 这个处理错误的思想来源于go官方的blog：[errors-are-values](https://go.dev/blog/errors-are-values)。
 
+#### 与Redis的持久化对比
+要说到键值对存储系统，那就必须得提到[redis](https://github.com/redis/redis)了。
+我们知道，Redis有RDB和AOF两种持久化方式，RDB是将Redis所有的数据都保存在文件中，而AOF是将Redis执行的写命令保存在文件中。
+RDB的每次写入都是全量的数据写入，随着数据逐渐增多，耗费时间也会增多，文件大小也会越大。
+- **为何Raft不采用追加写？**
+AOF则是采用追加写（append）来保存写命令，需要注意的是，Redis不是像`write-ahead log`那样在执行命令前就写日志，而是在命令执行后才会写日志，具体可见[sever.c文件中的call](https://github.com/redis/redis/blob/5.0/src/server.c)方法。
+很显然，Raft的log的是可以采用上述的追加写的方式进行持久化的，这样就不用每次都重写整个文件的内容了；但鉴于Raft还有诸如`votedFor`、`currentTerm`这样的字段要和log一并保存， 因此不好采用这种追加写的方式来持久化。
+- **Raft的刷盘时机**
+我们知道[redis](https://github.com/redis/redis)是一个高性能的键值对存储数据库；但同时我们也知道，将数据写入磁盘是非常耗时的。 因此，[redis](https://github.com/redis/redis)是先将
+命令的log写入到`aof_buf`，然后再将`aof_buf`中的数据写入到磁盘。[redis](https://github.com/redis/redis)提供了三种刷盘策略：`always`、`everysec`、`none`。
+[redis](https://github.com/redis/redis)默认配置是`everysec`，即每秒钟将`aof_buf`写入到磁盘，这是对性能和可靠性的折中，具体可见[aof.c中的flushAppendOnlyFile方法](https://github.com/redis/redis/blob/5.0/src/aof.c)。
+Raft共识算法要求log必须在返回response之前就将数据保存在磁盘上，因此采用类似于`always`策略。
+
+
 ## 参考
 这两个课程视频对实现Raft有很大的帮助：
 1. [Lecture 6: Fault Tolerance: Raft (1)](https://www.youtube.com/watch?v=64Zp3tzNbpE&list=PLrw6a1wE39_tb2fErI4-WkMbsvGQk9_UB&index=6)
@@ -510,3 +540,6 @@ func (ps *Storage) writeSnapshot(writer *errWriter, snapshot []byte) {
 另外，想要了解Paxos共识算法，也可以看看他的[Paxos lecture (Raft user study)](https://www.youtube.com/watch?v=JEpsBg0AO6o&t=318s)；
 我的亲身经历告诉我，这篇[Paxos算法的乱七八糟讲解的博客](https://www.cnblogs.com/linbingdong/p/6253479.html)的内容和原作者的视频的内容极为相似，
 相似就算了，关键是内容有错误，看了文章后对算法本身认识就有误区，后来还是看原作者的视频才醒悟过来。
+
+阅读Redis5.0的源码对理解实际的键值对数据库是如何设计的有很大帮助：
+[redis5.0](https://github.com/redis/redis/blob/5.0/src)
