@@ -530,6 +530,9 @@ AOF则是采用追加写（append）来保存写命令，需要注意的是，Re
 [redis](https://github.com/redis/redis)默认配置是`everysec`，即每秒钟将`aof_buf`写入到磁盘，这是对性能和可靠性的折中，具体可见[aof.c中的flushAppendOnlyFile方法](https://github.com/redis/redis/blob/5.0/src/aof.c)。
 Raft共识算法要求log必须在返回response之前就将数据保存在磁盘上，因此采用类似于`always`策略。
 
+在阅读redis源码后，其持久化流程大致如下：
+
+![redis_persistence.jpg](redis_persistence.jpg)
 
 ## 参考
 这两个课程视频对实现Raft有很大的帮助：
