@@ -168,12 +168,17 @@ func (kv *KVServer) logPrintf(format string, v ...interface{}) {
 	}
 }
 
-func (kv *KVServer) OpenSession(_ context.Context, request *common.OpenSessionRequest) (*common.OpenSessionReply, error) {
+func (kv *KVServer) OpenSession(c context.Context, request *common.OpenSessionRequest) (*common.OpenSessionReply, error) {
 	kv.logPrintf("receive OpenSession request from client")
 	reply := &common.OpenSessionReply{}
 	reply.SessionId = ""
 	if request.RequestType != common.RequestType_OPEN_SESSION {
 		reply.ErrCode = common.ErrCode_INVALID_REQUEST_TYPE
+		return reply, nil
+	}
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.ErrCode = common.ErrCode_WRONG_LEADER
 		return reply, nil
 	}
 	if request.GetPassword() != kv.password {
