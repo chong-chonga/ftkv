@@ -17,7 +17,7 @@ kvserver:
   # 是否开启KVServer日志（可选），默认不开启，这在debug时会很有用
   logEnabled: false
 raft:
-  # Raft运行的端口
+  # Raft运行的端口（必须配置）
   port: 8084
   # 集群中其他Raft的ip地址+端口（必须配置）
   server-addresses: [ '127.0.0.1:8083', '127.0.0.1:8085' ]

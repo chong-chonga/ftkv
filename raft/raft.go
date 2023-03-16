@@ -683,8 +683,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) erro
 			if err != nil {
 				panic(err)
 			}
+			// If election timeout elapses without receiving AppendEntries
+			// RPC from current leader or granting vote to candidate:
+			// convert to candidate
+			rf.resetTimeout()
 		}
-		rf.resetTimeout()
 	}()
 
 	// rules for all servers in Figure 2
