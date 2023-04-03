@@ -121,10 +121,23 @@ KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕�
 而对于第三种情况来说，客户端的请求可能会执行也可能不会执行；对客户端而言，命令没有达成共识和网络延迟是一样的情况，请求是否执行对于客户端来说也是不确定的。
 
 ## 有哪些地方是可以改进的？
-1. 目前，service与raft之间的通信采用的是阻塞式的**channel**，尽管raft发送log/snapshot是由乐观锁控制的，因此raft发送和service接收的间隔内浪费了部分性能。可以采用缓冲式的
-**channel**来减少间隔的出现频率。缓冲不应该设置的太大，否则会浪费空间（时空权衡又来了），缓冲的大小应该视service处理速度与raft发送速度的差距而定。
-2. 当前的Raft实现还不支持动态配置（即Configuration Changes）；现实情况下，我们往往要移除故障机器并添加新机器，同时要求当前集群的机器能够继续工作。
-3. 不支持动态调整后台任务执行频率（如Raft是每秒执行10次log commit），Redis Server能根据客户端数量和配置的频率数动态确定后台任务执行频率
+从整个系统层面来看，raft和上层的service就是一个Producer-Consumer关系。raft负责对日志进行一致性复制，并生产committed log给service；service负责消费committed log并执行相应的操作。
+另外，raft还负责持久化log和snapshot，某种层面上说，raft也相当于一个存储引擎。因此优化可以分别从两方面入手：生产消息和持久化消息。
+### raft层
+1. commit log效率低下：根据raft共识算法，log从提交到commit至少需要两轮RPC。如果依赖于`leader`是100ms发送一次`AppendEntries`RPC，可能需要花费200ms左右；而如果在收到新的log就启动一次
+`AppendEntries`RPC的话，当提交的log比较频繁时，RPC开销会很大。因此在RPC方面，可以考虑批量发送log（batch），比如在收到一定量的log后再启动RPC。某种程度上，类似于OS的缓冲区思想；另外，如kafka等消息队列的生产者也做了这个优化。
+**系统之间的设计想通+1**。
+2. log内存复用：go语言的内存也是自动管理的，所以也会进行垃圾回收。因此在快照时截断log的操作可以对log的内存进行复用，而无需释放内存。
+### RPC层
+可以把RPC看成消息，因此可以对消息进行压缩，从而降低RPC的开销。而GRPC框架提供了高效的序列化。
+### 存储层
+raft对log和snapshot的持久化无需考虑到查找效率，因此也无需采用B+Tree的形式存储，另外，raft的持久化考虑更多的数据的可靠性，因此也无需采用LSM Tree的存储方式。
+但可以考虑对数据进行分片，每个raft负责存储一部分数据，以提高系统的吞吐量。
+### 借鉴其他系统的思想
+像kafka这样的消息队列，也是按照消息队列的三部分行优化的：生产-存储-消费。在生产消息方面，进行了批处理、压缩、序列化、复用内存。在存储消息方面，利用了IO多路复用、数据分段、磁盘顺序写等。
+像Redis这样的内存NoSQL数据库，提供了支持数据分片的Cluster模式、利用IO多路复用监听事件、基于写时复制的后台持久化等等。
+MySQL在数据量比较大的时候，会采用字段的垂直拆分和数据量的水平拆分。同时，MySQL、kafka、Redis的Sentinel模式都是采用Primary-Backup模式复制副本，提高系统的可用性。某种程度上说，这些系统背后的思想都是想通的。
+
 Redis5.0的[server.c](https://github.com/redis/redis/blob/5.0/src/server.c)文件中的`serverCron`方法能够根据`clients`和配置的`config_hz`
 共同确定`dynamic_hz`：
 ```c
@@ -533,6 +546,7 @@ Raft共识算法要求log必须在返回response之前就将数据保存在磁�
 在阅读redis源码后，其持久化流程大致如下：
 
 ![redis_persistence.jpg](redis_persistence.jpg)
+[在线访问该图片](https://www.processon.com/view/link/6412a9db19abb33de950aef4)
 
 ## 参考
 这两个课程视频对实现Raft有很大的帮助：
