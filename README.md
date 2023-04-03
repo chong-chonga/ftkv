@@ -134,10 +134,10 @@ KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕�
 raft对log和snapshot的持久化无需考虑到查找效率，因此也无需采用B+Tree的形式存储，另外，raft的持久化考虑更多的数据的可靠性，因此也无需采用LSM Tree的存储方式。
 但可以考虑对数据进行分片，每个raft负责存储一部分数据，以提高系统的吞吐量。
 ### 借鉴其他系统的思想
-像kafka这样的消息队列，也是按照消息队列的三部分行优化的：生产-存储-消费。在生产消息方面，进行了批处理、压缩、序列化、复用内存。在存储消息方面，利用了IO多路复用、数据分段、磁盘顺序写等。
-像Redis这样的内存NoSQL数据库，提供了支持数据分片的Cluster模式、利用IO多路复用监听事件、基于写时复制的后台持久化等等。
-MySQL在数据量比较大的时候，会采用字段的垂直拆分和数据量的水平拆分。同时，MySQL、kafka、Redis的Sentinel模式都是采用Primary-Backup模式复制副本，提高系统的可用性。某种程度上说，这些系统背后的思想都是想通的。
-
+kafka这样的消息队列，也是按照消息队列的三部分行优化的：生产-存储-消费。在生产消息方面，进行了批处理、压缩、序列化、复用内存。
+在存储消息方面，将同一个topic分成多个partition，每个partition类似于raft group，都是负责一部分数据。一个partition的数据又分为多个Segment，每个Segment都负责存储一部分数据（是不是有点像`ConcurrentHashMap`？）。
+Redis这样的内存NoSQL数据库，提供了支持数据分片的Cluster模式、利用IO多路复用监听事件、基于写时复制的后台持久化等等。
+MySQL在数据量比较大的时候，会采用字段的垂直拆分和数据量的水平拆分。同时，MySQL、kafka、Redis的Sentinel模式都是采用Primary-Backup模式复制副本，提高系统的可用性。当阅读这些系统背后的底层原理时，会发现这些原理其实是想通的。
 Redis5.0的[server.c](https://github.com/redis/redis/blob/5.0/src/server.c)文件中的`serverCron`方法能够根据`clients`和配置的`config_hz`
 共同确定`dynamic_hz`：
 ```c
