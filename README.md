@@ -38,42 +38,31 @@ go run main.go
 
 在开发FT-KVService时，存在很多问题，以下是我的思考
 
-### KVServer有过滤重复的相同请求的必要吗
-[lab3](http://nil.csail.mit.edu/6.824/2021/labs/lab-kvraft.html)是进行了一些假设的，例如一个客户端一次只会发送一个请求、假如命令迟迟没有达成共识，客户端会一直等待下去。
-基于这个假设，KVServer就需要过滤客户端相同且重复的请求。为此，可以使用ClientId+RequestId来标记客户端的请求。
-客户端从KVServer拿到ClientId(单调递增，保证唯一)后，RequestId初始化为1，每次完成一个请求后，RequestId原子递增。
-KVServer用于检测重复请求的代码如下：
-```go
-func (kv *KVServer) startApply() {
-	for {
-		msg := <-kv.applyCh
-		if msg.CommandValid {
-			op := msg.Command.(Op)
-			commandType := op.OpType
-			requestId := op.RequestId
-			// ...
-				if id, exists := kv.requestMap[op.ClientId]; !exists || requestId > id {
-					// ...
-					kv.requestMap[op.ClientId] = requestId
-				} else {
-					log3A("[%d] duplicate %s request, requestId=%d", kv.me, op.OpType, op.RequestId)
-				}
-			}
-			//...
-			kv.mu.Unlock()
-		} else if msg.SnapshotValid {
-			//...
-		} else {
-			log.Fatalf("[%d] receive unknown type log!", kv.me)
-		}
-	}
-}
-```
-现实情况是：如果请求迟迟没有完成，是不应该一直等待下去的，而是应该有一个超时时间（RPCTimeout）。另外， 单个客户端同一时间可能会发出多个请求（并发）。 
-采用上面的ClientId+RequestId来检测重复请求显然是不现实的。如果KVServer要存储所有的ClientId+RequestId，不仅增加了系统复杂度，还增大了内存消耗。
-经过上述考虑，这段代码从KVServer中移除。
+### 幂等性接口
+[6.824: Distributed Systems Spring 2021](http://nil.csail.mit.edu/6.824/2021/)的Service提供Get、Put、Append、Delete四种操作，其中，Append操作不具备幂等性。
+由于分布式系统固有的不可靠性，客户端可能会重试请求，因此实验要求我们能够检测到重复的请求，并确保一个请求只会被执行一次。这其实就是设计幂等性接口，这种需求经常出现在”按钮“的场景中，
+比如下单、支付、浏览器刷新重新提交表单等。 单机系统中的幂等性接口比较好设计，可以在提交请求前让服务端生成一个标识，服务端在执行完请求后就删除这个标识，表示请求已经被执行过了。
+而在分布式系统中，还需要考虑标识的唯一性。为了对请求进行重复性检测，就需要为每个请求生成一个唯一标识。一个客户端会执行发起多次请求，因此可以采用全局唯一客户端标识+序列号来标识每个请求。
+具体来说，客户端在发出请求前先分配一个全局唯一标识，在随后的请求中，客户端同时使用自身递增的序列号标识每个请求。这样就只需要在请求的一开始生成一个标识即可，后续的序列号由客户端生成。
 
-### 如何验证客户端的身份
+在生成全局唯一标识方面，主要有以下几种方式：
+1. 使用UUID+时间戳/随机数
+2. 使用雪花算法
+3. 分布式ID生成器
+
+第一种方式生成的表示不能确保全局唯一，尤其是在分布式系统中。第二种方式比较常用，在这里不考虑。可以利用Raft来构建一个具备容错能力的分布式ID生成器。客户端首先向ID生成器发出请求，
+ID生成器利用Raft共识算法对请求进行commit后，对ID进行递增后，将ID返回给客户端。ID是int64类型时，可以生成2^63-1个不同的ID。
+如此一来，就解决了为每个客户端生成一个全局唯一标识的问题。由于客户端的序列号也是递增的，因此 服务端可以通过客户端ID+请求序列号来判断请求是否重复，如果序列号不大于
+记录的序列号，则说明请求重复。但是，当客户端同时发送多个不同序列号的请求时（比如序列号1-5），问题会更复杂。
+1. 无论请求何时到达，这些请求都会被执行。优点：允许客户端同时发送多个请求。缺点：服务端需要记录客户端所有的请求序列号，内存开销会很大。
+2. 服务端只能按递增顺序处理请求，后面的请求只能等待前面的请求完成后才能执行。优点：对于每个客户端，只需要记录上次执行的请求的序列号，内存开销小。缺点：只允许客户端一次发送一个请求。
+
+因此，lab3给出了"客户端一次只会发送一个请求，如果请求失败，将会一直重试"这样的假设。
+而[Fault-tolerant Key/Value Service](https://github.com/chong-chonga/FaultTolerantKVService)的目标是提供像Redis那样的功能，如Get、Set、Delete操作，不包括Append操作。
+Get、Set、Delete本身就带有幂等性。因此无需实现幂等性接口。而Router的`Join、Leave`不具备幂等性，但基本是由系统管理员所使用，使用频率较低，对幂等性要求较强，因此需要采用幂等性设计。
+
+
+### Server的安全性
 
 - **起因**：我们不希望自己的KVServer被随意访问，因此想要给KVServer加上一层认证措施，只有符合条件的客户端的请求才能被处理。
   这里当然会想到给KVServer设置密码，只有客户端提供正确的密码后，才是通过认证的客户端。
@@ -126,7 +115,7 @@ KVServer依靠Raft共识算法来达到强一致性，对抗网络分区、宕�
 ### raft层
 1. commit log效率低下：根据raft共识算法，log从提交到commit至少需要两轮RPC。如果依赖于`leader`是100ms发送一次`AppendEntries`RPC，可能需要花费200ms左右；而如果在收到新的log就启动一次
 `AppendEntries`RPC的话，当提交的log比较频繁时，RPC开销会很大。因此在RPC方面，可以考虑批量发送log（batch），比如在收到一定量的log后再启动RPC。某种程度上，类似于OS的缓冲区思想；另外，如kafka等消息队列的生产者也做了这个优化。
-**系统之间的设计想通+1**。
+**系统之间的设计相通+1**。
 2. log内存复用：go语言的内存也是自动管理的，所以也会进行垃圾回收。因此在快照时截断log的操作可以对log的内存进行复用，而无需释放内存。
 ### RPC层
 可以把RPC看成消息，因此可以对消息进行压缩，从而降低RPC的开销。而GRPC框架提供了高效的序列化。
@@ -137,11 +126,11 @@ raft对log和snapshot的持久化无需考虑到查找效率，因此也无需�
 - kafka这样的消息队列，也是按照消息队列的三部分行优化的：生产-存储-消费。在生产消息方面，进行了批处理、压缩、序列化、复用内存。
 在存储消息方面，将同一个topic分成多个partition，每个partition类似于raft group，都是负责一部分数据。一个partition的数据又分为多个Segment，每个Segment都负责存储一部分数据（是不是有点像`ConcurrentHashMap`？）。
 - Redis这样的内存NoSQL数据库，提供了支持数据分片的Cluster模式、利用IO多路复用监听事件、基于写时复制的后台持久化等等。
-- MySQL在数据量比较大的时候，会采用字段的垂直拆分和数据量的水平拆分。同时，MySQL、kafka、Redis的Sentinel模式都是采用Primary-Backup模式复制副本，提高系统的可用性。当阅读这些系统背后的底层原理时，会发现这些原理其实是想通的。
+- MySQL在数据量比较大的时候，会采用字段的垂直拆分和数据量的水平拆分。同时，MySQL、kafka、Redis的Sentinel模式都是采用Primary-Backup模式复制副本，提高系统的可用性。**系统之间的设计相通+2**。
 
 ## 实践思想
 
-### 1. 生产-消费-指定topic（raft负责复制log并commit，service负责提交Command并消费对应的committed log）
+### 1. 基于log's index和log's term的生产者-消费者模型
 
 在处理请求方面，基于Raft的KVServer相较于传统的KVServer有很大不同。KVServer是需要等待命令达成共识才能执行请求的。
 KVServer将Client的请求包装为一个Command提交给Raft， Raft会将达成共识的KVServer通过Channel发送给KVServer。
