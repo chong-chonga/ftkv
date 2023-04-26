@@ -6,26 +6,26 @@ import (
 	"fmt"
 )
 
-// CommandType:byte is used for performance
-//type CommandType byte
+// commandType:byte is used for performance
+//type commandType byte
 //
 //const (
-//	commandType_Query CommandType = 0
-//	commandType_Join  CommandType = 1
-//	commandType_Leave CommandType = 2
+//	commandType_Query commandType = 0
+//	commandType_Join  commandType = 1
+//	commandType_Leave commandType = 2
 //)
 
-// CommandType:string is used for debugging
-type CommandType string
+// commandType:string is used for debugging
+type commandType string
 
 const (
-	commandType_Query CommandType = "Query"
-	commandType_Join  CommandType = "Join"
-	commandType_Leave CommandType = "Leave"
+	commandType_Query commandType = "Query"
+	commandType_Join  commandType = "Join"
+	commandType_Leave commandType = "Leave"
 )
 
 type command struct {
-	CommandType   CommandType
+	CommandType   commandType
 	ConfigId      int32
 	ReplicaGroups map[int32][]string
 	GroupIds      []int32
