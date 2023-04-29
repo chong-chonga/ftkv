@@ -42,8 +42,8 @@ message LeaveRequest {
 }
 
 enum ErrCode {
-    ERR_CODE_WRONG_LEADER = 0;
-    ERR_CODE_OK = 1;
+    ERR_CODE_OK = 0;
+    ERR_CODE_WRONG_LEADER = 1;
     ERR_CODE_INVALID_ARGUMENT = 2;
 }
 
