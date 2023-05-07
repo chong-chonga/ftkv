@@ -1,6 +1,6 @@
 # ftkv
-一种具有强一致性的分布式键值对存储系统，基于raft共识算法提供一种可靠的方式来存储需要由分布式系统或机器集群访问的数据。支持Get、Put、Append、Delete四种操作。
-它可以在网络分区期间进行领导者选举，并可以容忍机器故障。Server支持grpc调用，具备密码认证、会话管理、重启恢复等特性；Client支持在备机间自动故障转移。
+一种具有强一致性的分布式键值对存储系统，基于raft共识算法提供一种可靠的方式来存储需要由分布式系统或机器集群访问的数据。它可以在网络分区期间进行领导者选举，并可以容忍机器故障。
+系统分为三个部部分：Server、Client、Router。Router是全局的控制中心，管理Raft Groups的数据分片。Server、Router都使用Raft进行复制。Client支持基本的故障转移。
 
 ## 背景
 思路来源于[6.824: Distributed Systems Spring 2021](http://nil.csail.mit.edu/6.824/2021/) lab2-lab3。这两个实验实现了一个简易的raft和kvserice，
