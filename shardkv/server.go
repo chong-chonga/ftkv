@@ -223,12 +223,10 @@ func (s *server) logPrintf(method string, format string, a ...interface{}) {
 	}
 }
 
-func (s *server) logFatlf(method string, format string, a ...interface{}) {
-	if s.logEnabled {
-		prefix := "[" + strconv.FormatInt(int64(s.groupId), 10) + "-" + s.shardkvId + "] " + method + ": "
-		str := fmt.Sprintf(prefix+format, a...)
-		log.Fatalln(str)
-	}
+func (s *server) logFatalf(method string, format string, a ...interface{}) {
+	prefix := "[" + strconv.FormatInt(int64(s.groupId), 10) + "-" + s.shardkvId + "] " + method + ": "
+	str := fmt.Sprintf(prefix+format, a...)
+	log.Fatalln(str)
 }
 
 func (s *server) makeSnapshot() (error, []byte) {
@@ -313,6 +311,7 @@ func (s *server) restore(snapshot []byte) error {
 	if err = d.Decode(&replicaGroups); err != nil {
 		return errors.New("decode replicaGroups fails: " + err.Error())
 	}
+	s.shardMu.Lock()
 	s.snapshotIndex = snapshotIndex
 	s.uniqueId = uniqueId
 	s.ht = ht
@@ -323,36 +322,71 @@ func (s *server) restore(snapshot []byte) error {
 	s.shardsToGet = shardsToGet
 	s.shardsToTransfer = shardsToTransfer
 	s.replicaGroups = replicaGroups
+	s.shardMu.Unlock()
 	s.logPrintf("restore", "restore snapshot success, snapshotIndex=%d", snapshotIndex)
 	return nil
 }
 
+func (s *server) shardInfo() string {
+	shardsToTransfer := make([]int, 0)
+	for _, shards := range s.shardsToTransfer {
+		shardsToTransfer = append(shardsToTransfer, shards...)
+	}
+	shardsToGet := make([]int, len(s.shardsToGet))
+	i := 0
+	for shard := range s.shardsToGet {
+		shardsToGet[i] = shard
+		i++
+	}
+	currentShards := make([]int, len(s.shards))
+	i = 0
+	for shard := range s.shards {
+		currentShards[i] = shard
+		i++
+	}
+	return fmt.Sprintf("shards:%v need to transfer, shards:%v need to get, "+"responsible for shards:%v currently", shardsToTransfer, shardsToGet, currentShards)
+}
+
+func (s *server) isLeader() bool {
+	_, isLeader := s.rf.GetState()
+	return isLeader
+}
+
 func (s *server) Get(_ context.Context, args *shardproto.GetRequest) (*shardproto.GetReply, error) {
+	key := args.Key
 	c := command{
 		CommandType: commandType_Get,
-		Key:         args.Key,
-		Shard:       router.Key2Shard(args.Key),
 	}
 	reply := &shardproto.GetReply{}
 	errCode := s.submit(c)
+	value := ""
+	exist := false
 	if errCode == shardproto.ResponseCode_OK {
 		shard := router.Key2Shard(args.Key)
-		if b, exist := s.shards[shard]; exist && b == 1 {
-			reply.ErrCode = shardproto.ResponseCode_WRONG_GROUP
-		} else {
-			value, exist := s.ht[c.Key]
-			if !exist {
-				reply.ErrCode = shardproto.ResponseCode_KEY_NOT_EXISTS
-			} else {
+		shardMu := s.shardMu
+		// check if shard exists first, then fetch the data
+		// 1. the group which receives the data, will save data first, then update shards
+		// 2. then group which transfers data will delete shards first, then delete data
+		// If the lock is not applied, it is still possible to read incorrect data.
+		// For example, the shard exists when first check,
+		// but the cluster starts to transfer shards and deletes the data quickly, the value read is an empty string
+		shardMu.Lock()
+		if _, exist = s.shards[shard]; exist {
+			value, exist = s.ht[c.Key]
+			if exist {
 				reply.Exist = true
 				reply.Value = value
+			} else {
+				reply.ErrCode = shardproto.ResponseCode_KEY_NOT_EXISTS
 			}
+		} else {
+			reply.ErrCode = shardproto.ResponseCode_WRONG_GROUP
 		}
-
-		s.logPrintf("handleClientRequest", "query key %s, value=%s, exist=%v", c.Key, value, exist)
-
+		shardMu.Unlock()
 	}
-	reply.ErrMessage = reply.ErrCode.String()
+	errmsg := reply.ErrCode.String()
+	reply.ErrMessage = errmsg
+	s.logPrintf("handleClientUpdateRequest", "query key=%s, value=%s, exist=%v, errmsg=%s", key, value, exist, errmsg)
 	return reply, nil
 }
 
@@ -361,7 +395,6 @@ func (s *server) Set(_ context.Context, args *shardproto.SetRequest) (*shardprot
 		CommandType: commandType_Set,
 		Key:         args.Key,
 		Value:       args.Value,
-		Shard:       router.Key2Shard(args.Key),
 	}
 	reply := &shardproto.SetReply{}
 	reply.ErrCode = s.submit(c)
@@ -373,7 +406,6 @@ func (s *server) Delete(_ context.Context, args *shardproto.DeleteRequest) (*sha
 	c := command{
 		CommandType: commandType_Delete,
 		Key:         args.Key,
-		Shard:       router.Key2Shard(args.Key),
 	}
 	reply := &shardproto.DeleteReply{}
 	reply.ErrCode = s.submit(c)
@@ -383,7 +415,7 @@ func (s *server) Delete(_ context.Context, args *shardproto.DeleteRequest) (*sha
 
 func (s *server) Transfer(_ context.Context, args *shardproto.TransferRequest) (*shardproto.TransferReply, error) {
 	c := command{
-		CommandType: commandType_Shards_Transfer,
+		CommandType: commandType_Transfer_Shards,
 		ConfigId:    args.ConfigId,
 		Shards:      args.Shards,
 		Data:        args.Data,
@@ -424,7 +456,7 @@ func (s *server) configure(ownShards map[int]byte, currentGroup int32, configId 
 
 func (s *server) deleteShards(configId int32, groupId int32, keys []string) bool {
 	c := command{
-		CommandType: commandType_Shards_Delete,
+		CommandType: commandType_Delete_Shards,
 		ConfigId:    configId,
 		GroupId:     groupId,
 		Keys:        keys,
@@ -495,16 +527,17 @@ func (s *server) listenConfig(routerClient *router.ServiceClient) {
 				s.logPrintf("listenConfig", "get config: %v", config)
 				if config.ConfigId == nextConfigId {
 					shardMu.Lock()
-					if s.currentConfigId+1 == nextConfigId {
+					if s.currentConfigId+1 != nextConfigId {
+						shardMu.Unlock()
+					} else {
 						shards := copyShards(s.shards)
 						shardMu.Unlock()
+
 						replicaGroups := make(map[int32][]string)
 						for gid, servers := range config.ReplicaGroups {
 							replicaGroups[gid] = servers.Servers
 						}
 						s.configure(shards, groupId, config.ConfigId, config.ShardsMap, replicaGroups)
-					} else {
-						shardMu.Unlock()
 					}
 				}
 			}
@@ -520,33 +553,46 @@ func copyShards(src map[int]byte) map[int]byte {
 	return dst
 }
 
-func (s *server) isLeader() bool {
-	_, isLeader := s.rf.GetState()
-	return isLeader
-}
-
 func (s *server) transferShards() {
 	shardMu := s.shardMu
 	cond := s.transferCond
-	lastTransferConfig := 0
 	for {
 		if !s.isLeader() {
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 		shardMu.Lock()
-		for len(s.shardsToTransfer) == 0 || lastTransferConfig == int(s.currentConfigId) {
+		for len(s.shardsToTransfer) == 0 && s.isLeader() {
 			cond.Wait()
 		}
+		if !s.isLeader() {
+			shardMu.Unlock()
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
 		configId := s.currentConfigId
+		// copy the shards that need to be transferred currently
+		// in order to avoid holding the lock continuously during the data transfer process.
 		shardsToMove := copyShardsToTransfer(s.shardsToTransfer)
+		shardMu.Unlock()
+
 		finished := true
 		for gid, shards := range shardsToMove {
+			if len(shards) == 0 {
+				s.logFatalf("transferShards", "transfer empty shards to group:%d", gid)
+			}
+
+			// If there is a configuration change during the data transfer process,
+			// it indicates that other nodes have successfully transferred the data.
+			shardMu.Lock()
 			if configId != s.currentConfigId {
 				finished = false
+				shardMu.Unlock()
 				break
 			}
-			if !hasTransferred(gid, s.shardsToTransfer) {
+			if hasTransferred(gid, s.shardsToTransfer) {
+				shardMu.Unlock()
+			} else {
 				data := make(map[string]string)
 				var keys []string
 				for k, v := range s.ht {
@@ -561,41 +607,71 @@ func (s *server) transferShards() {
 				}
 				addrs := s.replicaGroups[gid]
 				shardMu.Unlock()
+
+				cancel := false
 				if len(addrs) > 0 {
 					client := MakeServiceClient(addrs)
-					shardMu.Lock()
-					if !s.isLeader() || s.currentConfigId != configId {
-						break
-					}
-					shardMu.Unlock()
 					int32Shards := make([]int32, len(shards))
 					for i, shard := range shards {
 						int32Shards[i] = int32(shard)
 					}
+					if !s.isLeader() {
+						finished = false
+						time.Sleep(500 * time.Millisecond)
+						break
+					}
+
+					shardMu.Lock()
+					if s.currentConfigId != configId {
+						shardMu.Unlock()
+						finished = false
+						break
+					}
+					shardMu.Unlock()
+
 					err := client.Transfer(configId, int32Shards, data)
 					for err != nil {
 						time.Sleep(200 * time.Millisecond)
+						if !s.isLeader() {
+							cancel = true
+							time.Sleep(500 * time.Millisecond)
+							break
+						}
+
+						shardMu.Lock()
+						if s.currentConfigId != configId {
+							shardMu.Unlock()
+							cancel = true
+							break
+						}
+						shardMu.Unlock()
+
 						err = client.Transfer(configId, int32Shards, data)
 					}
+				} // else... no groups alive,
+
+				if cancel {
+					finished = false
+					break
 				}
+
+				// It is possible for failures to occur during the data transfer process,
+				// so the data should not be deleted until the transfer is successful.
 				finished = s.deleteShards(configId, gid, keys)
-				shardMu.Lock()
 				if !finished {
 					break
 				}
 			}
 		}
+
 		if finished {
-			lastTransferConfig = int(configId)
 			s.logPrintf("dataTransfer", "finish current move, switch to next")
 		}
-
-		shardMu.Unlock()
 	}
 }
 
-func hasTransferred(gid int32, shardsToTransfer map[int32][]int) bool {
-	if shards, needTransfer := shardsToTransfer[gid]; needTransfer && shards != nil {
+func hasTransferred(groupToTransfer int32, shardsToTransfer map[int32][]int) bool {
+	if _, needTransfer := shardsToTransfer[groupToTransfer]; needTransfer {
 		return false
 	}
 	return true
@@ -619,7 +695,7 @@ func (s *server) executeCommands() {
 		if msg.CommandValid {
 			commandIndex := msg.CommandIndex
 			if commandIndex != expectedIndex {
-				log.Fatalf("[%s] expected log inedx is %d, but received is %d, applyMsg=%v", s.shardkvId, expectedIndex, commandIndex, msg)
+				s.logFatalf("executeCommands", "expected log index is %d, but received is %d, applyMsg=%v", expectedIndex, commandIndex, msg)
 			}
 			expectedIndex++
 			c := msg.Command
@@ -629,22 +705,25 @@ func (s *server) executeCommands() {
 			if ct != commandType_Get {
 				switch ct {
 				case commandType_Set, commandType_Delete:
-					commandTerm = s.handleClientRequest(c, commandTerm)
-					break
-				case commandType_Shards_Transfer:
-					ok := s.handleShardsTransfer(c.ConfigId, c.Shards, c.Data)
+					ok := s.handleClientUpdateRequest(ct, c.Key, c.Value)
 					if !ok {
-						commandTerm = configMismatchTerm
+						commandTerm = wrongGroupTerm
 					}
 					break
 				case commandType_Configure:
 					s.handleConfig(c.ConfigId, c.ShardsToGet, c.ShardsToTransfer, c.ReplicaGroups)
 					break
-				case commandType_Shards_Delete:
+				case commandType_Transfer_Shards:
+					ok := s.handleShardsTransfer(c.ConfigId, c.Shards, c.Data)
+					if !ok {
+						commandTerm = configMismatchTerm
+					}
+					break
+				case commandType_Delete_Shards:
 					s.handleShardsDelete(c.ConfigId, c.GroupId, c.Keys)
 					break
 				default:
-					log.Fatalf("[%s] receive unknown type command:%s", s.shardkvId, c.CommandString())
+					s.logFatalf("receives unknown type command:%s", s.shardkvId, c.CommandString())
 				}
 			}
 			s.replyClientIfNeeded(commandIndex, commandTerm)
@@ -664,15 +743,14 @@ func (s *server) executeCommands() {
 			}
 			snapshotIndex = s.snapshotIndex
 			if snapshotIndex != msg.SnapshotIndex {
-				log.Fatalf("[%s] service snapshot index is %d, but Raft snapshot index is %d", s.shardkvId,
-					snapshotIndex, msg.SnapshotIndex)
+				s.logFatalf("executeCommands", "service snapshot index is %d, but Raft snapshot index is %d", snapshotIndex, msg.SnapshotIndex)
 			}
 			if snapshotIndex < expectedIndex {
-				log.Fatalf("[%s] received snapshot is out-dated, expected log index=%d, received snapshot index=%d", s.shardkvId, expectedIndex, snapshotIndex)
+				s.logFatalf("executeCommands", "received snapshot is out-dated, expected log index=%d, received snapshot index=%d", expectedIndex, snapshotIndex)
 			}
 			expectedIndex = snapshotIndex + 1
 		} else {
-			log.Fatalf("[%s] receive unknown type meesage from Raft, applyMsg=%v", s.shardkvId, msg)
+			s.logFatalf("executeCommands", "receive unknown type message from Raft, applyMsg=%v", msg)
 		}
 	}
 }
@@ -688,41 +766,47 @@ func (s *server) replyClientIfNeeded(commandIndex int, commandTerm int) {
 	s.channelMu.Unlock()
 }
 
-func (s *server) handleClientRequest(c command, commandTerm int) int {
+// The transfer of shards and modification of data is single-threaded.
+// The listenConfig and transferShards threads only perform read operations on this data.
+// Therefore, locking can be deferred until just before modifying the data.
+func (s *server) handleClientUpdateRequest(ct commandType, key string, value string) bool {
 	shardMu := s.shardMu
-	shard := c.Shard
+	shard := router.Key2Shard(key)
 	shardMu.Lock()
-	if b, exist := s.shards[shard]; exist && b == 1 {
-		if c.CommandType == commandType_Set {
-			s.ht[c.Key] = c.Value
-			s.logPrintf("handleClientRequest", "set %s -> %s", c.Key, c.Value)
-		} else if c.CommandType == commandType_Delete {
-			delete(s.ht, c.Key)
-			s.logPrintf("handleClientRequest", "delete key %s", c.Key)
+	if _, exist := s.shards[shard]; exist {
+		if ct == commandType_Set {
+			s.ht[key] = value
+			s.logPrintf("handleClientUpdateRequest", "set %s -> %s", key, value)
+		} else {
+			delete(s.ht, key)
+			s.logPrintf("handleClientUpdateRequest", "delete key %s", key)
 		}
 	} else {
-		commandTerm = wrongGroupTerm
-		s.logPrintf("handleClientRequest", "can not handle request for shard:%d, current shards:%v", shard, s.shards)
+		s.logPrintf("handleClientUpdateRequest", "wrong group, commandType=%v, key=%s, shard=%d, "+
+			"current group is responsible for shards:%v", ct, key, shard, s.shards)
+		return false
 	}
 	shardMu.Unlock()
-	return commandTerm
+	return true
 }
 
 func (s *server) handleConfig(configId int32, shardsToGet map[int]byte, shardsToTransfer map[int32][]int, replicaGroups map[int32][]string) {
 	nextConfigId := s.currentConfigId + 1
 	if configId > nextConfigId {
-		s.logFatlf("[%s] expected nextConfigId=%d, but received configId=%d "+s.shardInfo(), s.shardkvId, nextConfigId, configId)
+		s.logFatalf("[%s] expected nextConfigId=%d, but received configId=%d "+s.shardInfo(), s.shardkvId, nextConfigId, configId)
 	} else if configId == nextConfigId {
-		shardMu := s.shardMu
-		shardMu.Lock()
+
 		if !s.reshard {
+			shardMu := s.shardMu
+			shardMu.Lock()
 			shards := s.shards
 			if configId == 1 {
 				// no shards to transfer when use initial configuration
 				for shard := range shardsToGet {
 					shards[shard] = 1
 				}
-				s.logPrintf("handleConfig", "use initial configId:%d, responsible for shards:%v currently", configId, s.shards)
+				s.logPrintf("handleConfig", "switch to initial configuration, configId=%d, responsible for shards:%v currently",
+					configId, s.shards)
 			} else {
 				if len(shardsToGet) != 0 || len(shardsToTransfer) != 0 {
 					s.reshard = true
@@ -739,52 +823,55 @@ func (s *server) handleConfig(configId int32, shardsToGet map[int]byte, shardsTo
 						s.transferCond.Signal()
 					}
 				}
-				s.logPrintf("handleConfig", "use configId:%d, "+s.shardInfo(), configId)
+				s.logPrintf("handleConfig", "switch to next configuration, configId=%d, ", configId)
+				s.logPrintf("handleConfig", s.shardInfo())
 			}
 			s.currentConfigId = configId
+			shardMu.Unlock()
 		}
-		shardMu.Unlock()
+
 	} // else... stale configuration
 }
 
 func (s *server) handleShardsTransfer(configId int32, transferredShards []int32, data map[string]string) bool {
-
 	if configId > s.currentConfigId {
 		return false
 	} else if configId == s.currentConfigId {
-		shardMu := s.shardMu
-		shardMu.Lock()
 		duplicate := false
 		shards := s.shards
 		for _, shard := range transferredShards {
-			if b, exist := shards[int(shard)]; exist && b == 1 {
+			if _, own := shards[int(shard)]; own {
 				duplicate = true
 				break
 			}
 		}
 		if !duplicate {
+			shardMu := s.shardMu
+			shardMu.Lock()
+			// save data first, then shards...
+			for k, v := range data {
+				s.ht[k] = v
+			}
 			shardsToGet := s.shardsToGet
 			for _, shard := range shards {
 				shards[int(shard)] = 1
 				delete(shardsToGet, int(shard))
-			}
-			for k, v := range data {
-				s.ht[k] = v
 			}
 			if len(s.shardsToTransfer) == 0 && len(s.shardsToGet) == 0 {
 				s.reshard = false
 			}
 			s.logPrintf("handleShardsTransfer", "accepts data for shards:%v in configId:%d", transferredShards, configId)
 			s.logPrintf("handleShardsTransfer", s.shardInfo())
+			shardMu.Unlock()
 		}
-		shardMu.Unlock()
+
 	} // else... stale transfer, return ok
 	return true
 }
 
 func (s *server) handleShardsDelete(configId int32, transferredGroupId int32, keys []string) {
 	if configId > s.currentConfigId {
-		s.logFatlf("handleShardsDelete", "advanced shards delete, currentConfigId=%d, delete shards for configId=%d",
+		s.logFatalf("handleShardsDelete", "advanced shards delete, currentConfigId=%d, delete shards for configId=%d",
 			s.currentConfigId, configId)
 	} else if configId == s.currentConfigId {
 		if shards, exist := s.shardsToTransfer[transferredGroupId]; exist {
@@ -802,24 +889,4 @@ func (s *server) handleShardsDelete(configId int32, transferredGroupId int32, ke
 			shardMu.Unlock()
 		}
 	} // else... stale delete
-}
-
-func (s *server) shardInfo() string {
-	shardsToTransfer := make([]int, 0)
-	for _, shards := range s.shardsToTransfer {
-		shardsToTransfer = append(shardsToTransfer, shards...)
-	}
-	shardsToGet := make([]int, len(s.shardsToGet))
-	i := 0
-	for shard := range s.shardsToGet {
-		shardsToGet[i] = shard
-		i++
-	}
-	currentShards := make([]int, len(s.shards))
-	i = 0
-	for shard := range s.shards {
-		currentShards[i] = shard
-		i++
-	}
-	return fmt.Sprintf("shards:%v need to transfer, shards:%v need to get, "+"responsible for shards:%v currently", shardsToTransfer, shardsToGet, currentShards)
 }
