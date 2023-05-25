@@ -3,8 +3,8 @@ package router
 import (
 	"context"
 	"errors"
-	"github.com/kvservice/v1/router/protobuf"
-	"github.com/kvservice/v1/tool"
+	"github.com/ftkv/v1/router/routerproto"
+	"github.com/ftkv/v1/tool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -36,15 +36,119 @@ func readClientConfig(configData []byte) (*ClientConfig, error) {
 	return &conf.ClientConfig, err
 }
 
-type serviceClient struct {
-	rpcClients      []protobuf.RouterClient
+type ServiceClient struct {
+	rpcClients      []routerproto.RouterClient
 	serverAddresses []string
 	lastLeader      int
 	timeout         time.Duration
 	logEnabled      bool
 }
 
-func MakeServiceClient(configData []byte) (*serviceClient, error) {
+const defaultTimeout = 5 * time.Second
+
+func MakeServiceClient(routerAddresses []string) (*ServiceClient, error) {
+	err := tool.Check(routerAddresses)
+	if err != nil {
+		return nil, err
+	}
+	serverCount := len(routerAddresses)
+	rpcClients := make([]routerproto.RouterClient, serverCount)
+	for i := 0; i < serverCount; i++ {
+		conn, _ := grpc.Dial(routerAddresses[i], grpc.WithTransportCredentials(insecure.NewCredentials()))
+		rpcClients[i] = routerproto.NewRouterClient(conn)
+	}
+	client := &ServiceClient{
+		rpcClients:      rpcClients,
+		serverAddresses: routerAddresses,
+		lastLeader:      -1,
+		timeout:         defaultTimeout,
+		logEnabled:      true,
+	}
+
+	return client, nil
+}
+
+func (c *ServiceClient) logPrintf(format string, a ...interface{}) {
+	if c.logEnabled {
+		log.Printf(format, a...)
+	}
+}
+
+func (c *ServiceClient) QueryLatest() (*routerproto.ClusterConfigWrapper, error) {
+	return c.Query(routerproto.LatestConfigId)
+}
+
+func (c *ServiceClient) Query(configId int32) (*routerproto.ClusterConfigWrapper, error) {
+	if ok, _, errmsg := routerproto.ValidateConfigId(configId); !ok {
+		return nil, errors.New(errmsg)
+	}
+	request := &routerproto.QueryRequest{
+		ConfigId: configId,
+	}
+	ret, err := c.callWithRetry(request, c.handleQuery)
+	if err != nil {
+		return nil, err
+	}
+	return ret.(*routerproto.ClusterConfigWrapper), nil
+}
+
+func (c *ServiceClient) callWithRetry(args interface{}, handleRPC func(args interface{}, rpcClient routerproto.RouterClient) (interface{}, bool, error)) (interface{}, error) {
+	rpcClients := c.rpcClients
+	serverCount := len(rpcClients)
+	s := tool.ChooseServer(c.lastLeader, serverCount)
+	rpcClient := rpcClients[s]
+	for i := 0; i < serverCount; i++ {
+		ret, ok, err := handleRPC(args, rpcClient)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			c.lastLeader = s
+			return ret, nil
+		}
+		// else retry
+		s++
+		if s >= serverCount {
+			s = 0
+		}
+		rpcClient = rpcClients[s]
+	}
+	return nil, errors.New("service unavailable")
+}
+
+func (c *ServiceClient) handleQuery(request interface{}, rpcClient routerproto.RouterClient) (interface{}, bool, error) {
+	queryRequest := request.(*routerproto.QueryRequest)
+	c.logPrintf("send query request:%v", queryRequest)
+
+	var queryReply *routerproto.QueryReply
+	var err error
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+		defer cancel()
+		queryReply, err = rpcClient.Query(ctx, queryRequest)
+	}
+	c.logPrintf("receive query reply:%v, err=%v", queryReply, err)
+	if err != nil {
+		s, _ := status.FromError(err)
+		if s.Code() == codes.DeadlineExceeded {
+			return nil, false, errors.New("service unavailable")
+		}
+	} else {
+		if queryReply.ErrCode == routerproto.ErrCode_ERR_CODE_INVALID_ARGUMENT {
+			return nil, false, errors.New(queryReply.ErrMessage)
+		}
+		if queryReply.ErrCode == routerproto.ErrCode_ERR_CODE_OK {
+			return queryReply.ConfigWrapper, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+type SystemClient struct {
+	*ServiceClient
+}
+
+func MakeSystemClient(configData []byte) (*SystemClient, error) {
 	clientConfig, err := readClientConfig(configData)
 	if err != nil {
 		return nil, &tool.RuntimeError{Stage: "load config", Err: err}
@@ -59,14 +163,14 @@ func MakeServiceClient(configData []byte) (*serviceClient, error) {
 		return nil, errors.New("timeout must be a positive number")
 	}
 	serverCount := len(serverAddresses)
-	rpcClients := make([]protobuf.RouterClient, serverCount)
+	rpcClients := make([]routerproto.RouterClient, serverCount)
 	for i := 0; i < serverCount; i++ {
 		conn, _ := grpc.Dial(serverAddresses[i], grpc.WithTransportCredentials(insecure.NewCredentials()))
-		rpcClients[i] = protobuf.NewRouterClient(conn)
+		rpcClients[i] = routerproto.NewRouterClient(conn)
 	}
 
 	log.Printf("router client info: serverAddresses:%v, timeout=%dms, logEnabled=%v", serverAddresses, timeout, clientConfig.LogEnabled)
-	client := &serviceClient{
+	client := &ServiceClient{
 		rpcClients:      rpcClients,
 		serverAddresses: serverAddresses,
 		lastLeader:      -1,
@@ -74,101 +178,14 @@ func MakeServiceClient(configData []byte) (*serviceClient, error) {
 		logEnabled:      clientConfig.LogEnabled,
 	}
 
-	return client, nil
-}
-
-func (c *serviceClient) logPrintf(format string, a ...interface{}) {
-	if c.logEnabled {
-		log.Printf(format, a...)
-	}
-}
-
-func (c *serviceClient) QueryLatest() (*protobuf.ClusterConfigWrapper, error) {
-	return c.Query(protobuf.LatestConfigId)
-}
-
-func (c *serviceClient) Query(configId int32) (*protobuf.ClusterConfigWrapper, error) {
-	if ok, _, errmsg := protobuf.ValidateConfigId(configId); !ok {
-		return nil, errors.New(errmsg)
-	}
-	request := &protobuf.QueryRequest{
-		ConfigId: configId,
-	}
-	ret, err := c.callWithRetry(request, c.handleQuery)
-	if err != nil {
-		return nil, err
-	}
-	return ret.(*protobuf.ClusterConfigWrapper), nil
-}
-
-func (c *serviceClient) callWithRetry(args interface{}, handleRPC func(args interface{}, rpcClient protobuf.RouterClient) (interface{}, bool, error)) (interface{}, error) {
-	rpcClients := c.rpcClients
-	serverCount := len(rpcClients)
-	server := tool.ChooseServer(c.lastLeader, serverCount)
-	rpcClient := rpcClients[server]
-	for i := 0; i < serverCount; i++ {
-		ret, ok, err := handleRPC(args, rpcClient)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			return ret, nil
-		}
-		// else retry
-		server++
-		if server >= serverCount {
-			server = 0
-		}
-		rpcClient = rpcClients[server]
-	}
-	return nil, errors.New("service unavailable")
-}
-
-func (c *serviceClient) handleQuery(request interface{}, rpcClient protobuf.RouterClient) (interface{}, bool, error) {
-	queryRequest := request.(*protobuf.QueryRequest)
-	c.logPrintf("send query request:%v", queryRequest)
-
-	var queryReply *protobuf.QueryReply
-	var err error
-	{
-		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-		defer cancel()
-		queryReply, err = rpcClient.Query(ctx, queryRequest)
-	}
-	c.logPrintf("receive query reply:%v, err=%v", queryReply, err)
-	if err != nil {
-		s, _ := status.FromError(err)
-		if s.Code() == codes.DeadlineExceeded {
-			return nil, false, errors.New("service unavailable")
-		}
-	} else {
-		if queryReply.ErrCode == protobuf.ErrCode_ERR_CODE_INVALID_ARGUMENT {
-			return nil, false, errors.New(queryReply.ErrMessage)
-		}
-		if queryReply.ErrCode == protobuf.ErrCode_ERR_CODE_OK {
-			return queryReply.ConfigWrapper, true, nil
-		}
-	}
-	return nil, false, nil
-}
-
-type systemClient struct {
-	*serviceClient
-}
-
-func MakeSystemClient(configData []byte) (*systemClient, error) {
-	sc, err := MakeServiceClient(configData)
-	if err != nil {
-		return nil, err
-	}
-	c := &systemClient{sc}
+	c := &SystemClient{client}
 	return c, nil
 }
 
-func (c *systemClient) handleJoin(request interface{}, rpcClient protobuf.RouterClient) (interface{}, bool, error) {
-	joinRequest := request.(*protobuf.JoinRequest)
+func (c *SystemClient) handleJoin(request interface{}, rpcClient routerproto.RouterClient) (interface{}, bool, error) {
+	joinRequest := request.(*routerproto.JoinRequest)
 	c.logPrintf("send join request:%v", joinRequest)
-	var joinReply *protobuf.JoinReply
+	var joinReply *routerproto.JoinReply
 	var err error
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
@@ -182,20 +199,20 @@ func (c *systemClient) handleJoin(request interface{}, rpcClient protobuf.Router
 			return nil, false, errors.New("service unavailable")
 		}
 	} else {
-		if joinReply.ErrCode == protobuf.ErrCode_ERR_CODE_INVALID_ARGUMENT {
+		if joinReply.ErrCode == routerproto.ErrCode_ERR_CODE_INVALID_ARGUMENT {
 			return nil, false, errors.New(joinReply.ErrMessage)
 		}
-		if joinReply.ErrCode == protobuf.ErrCode_ERR_CODE_OK {
+		if joinReply.ErrCode == routerproto.ErrCode_ERR_CODE_OK {
 			return nil, true, nil
 		}
 	}
 	return nil, false, nil
 }
 
-func (c *systemClient) handleLeave(request interface{}, rpcClient protobuf.RouterClient) (interface{}, bool, error) {
-	leaveRequest := request.(*protobuf.LeaveRequest)
+func (c *SystemClient) handleLeave(request interface{}, rpcClient routerproto.RouterClient) (interface{}, bool, error) {
+	leaveRequest := request.(*routerproto.LeaveRequest)
 	c.logPrintf("send leave request:%v", leaveRequest)
-	var leaveReply *protobuf.LeaveReply
+	var leaveReply *routerproto.LeaveReply
 	var err error
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
@@ -209,28 +226,28 @@ func (c *systemClient) handleLeave(request interface{}, rpcClient protobuf.Route
 			return nil, false, errors.New("service unavailable")
 		}
 	} else {
-		if leaveReply.ErrCode == protobuf.ErrCode_ERR_CODE_INVALID_ARGUMENT {
+		if leaveReply.ErrCode == routerproto.ErrCode_ERR_CODE_INVALID_ARGUMENT {
 			return nil, false, errors.New(leaveReply.ErrMessage)
 		}
-		if leaveReply.ErrCode == protobuf.ErrCode_ERR_CODE_OK {
+		if leaveReply.ErrCode == routerproto.ErrCode_ERR_CODE_OK {
 			return nil, true, nil
 		}
 	}
 	return nil, false, nil
 }
 
-func (c *systemClient) Join(serverGroups map[int32][]string) error {
-	if ok, _, errmsg := protobuf.ValidateReplicaGroups(serverGroups); !ok {
+func (c *SystemClient) Join(serverGroups map[int32][]string) error {
+	if ok, _, errmsg := routerproto.ValidateReplicaGroups(serverGroups); !ok {
 		return errors.New(errmsg)
 	}
 	if len(serverGroups) == 0 {
 		return errors.New("empty server groups")
 	}
-	replicaGroups := make(map[int32]*protobuf.Servers)
+	replicaGroups := make(map[int32]*routerproto.Servers)
 	for gid, servers := range serverGroups {
-		replicaGroups[gid] = &protobuf.Servers{Servers: servers}
+		replicaGroups[gid] = &routerproto.Servers{Servers: servers}
 	}
-	joinRequest := &protobuf.JoinRequest{ReplicaGroups: replicaGroups}
+	joinRequest := &routerproto.JoinRequest{ReplicaGroups: replicaGroups}
 	_, err := c.callWithRetry(joinRequest, c.handleJoin)
 	if err != nil {
 		return err
@@ -238,11 +255,11 @@ func (c *systemClient) Join(serverGroups map[int32][]string) error {
 	return nil
 }
 
-func (c *systemClient) Leave(groupIds []int32) error {
-	if ok, _, errmsg := protobuf.ValidateGroupIds(groupIds); !ok {
+func (c *SystemClient) Leave(groupIds []int32) error {
+	if ok, _, errmsg := routerproto.ValidateGroupIds(groupIds); !ok {
 		return errors.New(errmsg)
 	}
-	leaveRequest := &protobuf.LeaveRequest{
+	leaveRequest := &routerproto.LeaveRequest{
 		GroupIds: groupIds,
 	}
 	_, err := c.callWithRetry(leaveRequest, c.handleLeave)

@@ -14,8 +14,8 @@ import (
 //	commandType_Set             commandType = 2
 //	commandType_Delete          commandType = 3
 //	commandType_Configure       commandType = 4
-//	commandType_Shards_Transfer commandType = 5
-//	commandType_Shards_Delete   commandType = 6
+//	commandType_Transfer_Shards commandType = 5
+//	commandType_Delete_Shards   commandType = 6
 //)
 
 // commandType:string is used for debugging
@@ -26,8 +26,8 @@ const (
 	commandType_Set             commandType = "Set"
 	commandType_Delete          commandType = "Delete"
 	commandType_Configure       commandType = "Configure"
-	commandType_Shards_Transfer commandType = "ShardsTransfer"
-	commandType_Shards_Delete   commandType = "ShardsDelete"
+	commandType_Transfer_Shards commandType = "ShardsTransfer"
+	commandType_Delete_Shards   commandType = "ShardsDelete"
 )
 
 type command struct {
@@ -36,7 +36,6 @@ type command struct {
 	// used to get/set/delete
 	Key   string
 	Value string
-	Shard int
 
 	// used to configure/shards transfer/shards delete
 	ConfigId int32

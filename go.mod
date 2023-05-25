@@ -1,4 +1,4 @@
-module github.com/kvservice/v1
+module github.com/ftkv/v1
 
 go 1.18
 
