@@ -2,6 +2,7 @@ package tool
 
 import (
 	"errors"
+	"math/rand"
 	"strconv"
 	"strings"
 )
@@ -17,7 +18,7 @@ func (re *RuntimeError) Error() string {
 
 func Check(addresses []string) error {
 	if len(addresses) == 0 {
-		return nil
+		return errors.New("addresses is empty")
 	}
 	m := make(map[string]byte)
 	for _, address := range addresses {
@@ -30,7 +31,7 @@ func Check(addresses []string) error {
 		}
 		port, err := strconv.Atoi(sp[1])
 		if err != nil || port <= 0 {
-			return errors.New("port " + sp[1] + " is invalid")
+			return errors.New(address + "'s port:" + sp[1] + " is invalid")
 		}
 		ipAddr := sp[0]
 		if "localhost" != ipAddr && !valid(ipAddr) {
@@ -68,4 +69,13 @@ func valid(queryIP string) bool {
 		return true
 	}
 	return false
+}
+
+func ChooseServer(lastLeader int, serverCount int) int {
+	if lastLeader != -1 {
+		return lastLeader
+	} else {
+		x := rand.Intn(serverCount)
+		return x
+	}
 }
