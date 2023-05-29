@@ -1,4 +1,6 @@
-package router
+// this Raft is specified for shardkv server
+
+package shardkv
 
 import (
 	"bytes"
@@ -17,8 +19,6 @@ import (
 	"sync"
 	"time"
 )
-
-// this Raft is specified for router server
 
 const heartbeatInterval = 100 // millisecond
 
@@ -204,15 +204,15 @@ func startRaft(conf raft.Config, storage *storage.Storage, applyCh chan applyMsg
 	}
 
 	// start go rpc server
-	s := rpc.NewServer()
-	err = s.Register(rf)
+	server := rpc.NewServer()
+	err = server.Register(rf)
 	if err != nil {
 		return nil, &tool.RuntimeError{Stage: "start Raft", Err: err}
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/", s)
+	mux.Handle("/", server)
 	go func() {
-		_ = http.ListenAndServe(":"+strconv.Itoa(port), s)
+		_ = http.ListenAndServe(":"+strconv.Itoa(port), server)
 	}()
 
 	// now is safe, start go routines
@@ -432,8 +432,8 @@ func (rf *Raft) persist() error {
 
 // GetState return currentTerm and whether this server believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 	var term = rf.currentTerm
 	var isLeader = strings.Compare(rf.state, leader) == 0
 
@@ -469,6 +469,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		e := &tool.RuntimeError{Stage: "snapshot", Err: err}
 		panic(e.Error())
 	}
+
 	rf.logInstallSnapshot("{%d] make a new snapshot, oldLastIncludedIndex=%d, newLastIncludedIndex=%d, trim log after %d", rf.me, old, index, discardedLogIndex)
 }
 
