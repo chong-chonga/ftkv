@@ -9,6 +9,7 @@ import (
 	"github.com/ftkv/v1/raft"
 	"github.com/ftkv/v1/router"
 	"github.com/ftkv/v1/shardkv/shardproto"
+	"github.com/ftkv/v1/storage"
 	"github.com/ftkv/v1/tool"
 	"google.golang.org/grpc"
 	"gopkg.in/yaml.v3"
@@ -20,8 +21,6 @@ import (
 )
 
 const (
-	keyNotExistsCommandTerm = -1
-
 	wrongGroupTerm = -2
 
 	configMismatchTerm = -3
@@ -42,7 +41,7 @@ type server struct {
 	maxRaftStateSize int
 	rf               *Raft
 	applyCh          chan applyMsg
-	storage          *tool.Storage
+	storage          *storage.Storage
 	waitingClients   map[int]chan int
 
 	shardkvId       string
@@ -54,13 +53,14 @@ type server struct {
 	uniqueId      int64
 	ht            map[string]string
 
-	currentConfigId  int32
-	reshard          bool
-	shards           map[int]byte
-	shardsToGet      map[int]byte
-	shardsToTransfer map[int32][]int
-	replicaGroups    map[int32][]string
-	nextConfig       int
+	currentConfigId     int32
+	noGroupsAliveBefore bool
+	reshard             bool
+	shards              map[int]byte
+	shardsToGet         map[int]byte
+	shardsToTransfer    map[int32][]int
+	replicaGroups       map[int32][]string
+	nextConfig          int
 }
 
 type ServerConfigWrapper struct {
@@ -112,7 +112,7 @@ func StartShardKVServer(configData []byte) (string, StopFunc, error) {
 	if port <= 0 {
 		return "", nil, &tool.RuntimeError{Stage: "configure shardkv server", Err: errors.New("server port " + strconv.Itoa(port) + " is invalid")}
 	}
-	routerClient, err := router.MakeServiceClient(config.RouterAddresses)
+	routerClient, err := router.MakeListenerClient(config.RouterAddresses)
 	if err != nil {
 		return "", nil, &tool.RuntimeError{Stage: "configure shardkv server", Err: err}
 	}
@@ -122,14 +122,18 @@ func StartShardKVServer(configData []byte) (string, StopFunc, error) {
 	//	return "", nil, &tool.RuntimeError{Stage: "configure shardkv server", Err: errors.New("session timeout must be positive")}
 	//}
 
-	routerId := config.ShardKVId
-	serviceName := "shardkv-" + routerId
-	storage, err := tool.MakeStorage(serviceName)
+	shardKVId := config.ShardKVId
+	groupId := config.GroupId
+	serviceName := "shardkv-" + strconv.Itoa(int(groupId)) + "-" + shardKVId
+	storage, err := storage.MakeStorage(serviceName)
 	if err != nil {
 		return "", nil, &tool.RuntimeError{Stage: "make storage", Err: err}
 	}
 
 	shardkv := new(server)
+	shardkv.channelMu = &sync.Mutex{}
+	shardkv.shardMu = &sync.Mutex{}
+	shardkv.transferCond = sync.NewCond(shardkv.shardMu)
 
 	snapshot := storage.GetSnapshot()
 	if nil != snapshot && len(snapshot) > 0 {
@@ -139,12 +143,9 @@ func StartShardKVServer(configData []byte) (string, StopFunc, error) {
 	} else {
 		shardkv.initPersistentState()
 	}
-	shardkv.channelMu = &sync.Mutex{}
-	shardkv.shardMu = &sync.Mutex{}
-	shardkv.transferCond = sync.NewCond(shardkv.shardMu)
 
-	shardkv.shardkvId = routerId
-	shardkv.groupId = config.GroupId
+	shardkv.shardkvId = shardKVId
+	shardkv.groupId = groupId
 	shardkv.routerAddresses = config.RouterAddresses
 	//shardkv.password = config.Password
 	//shardkv.sessionTimeout = time.Duration(timeout) * time.Second
@@ -208,6 +209,7 @@ func (s *server) initPersistentState() {
 	s.ht = make(map[string]string)
 
 	s.currentConfigId = 0
+	s.noGroupsAliveBefore = true
 	s.reshard = false
 	s.shards = make(map[int]byte)
 	s.shardsToGet = make(map[int]byte)
@@ -246,6 +248,9 @@ func (s *server) makeSnapshot() (error, []byte) {
 	if err = e.Encode(s.currentConfigId); err != nil {
 		return errors.New("encode currentConfigId fails: " + err.Error()), nil
 	}
+	if err = e.Encode(s.noGroupsAliveBefore); err != nil {
+		return errors.New("encode noGroupsAliveBefore fails: " + err.Error()), nil
+	}
 	if err = e.Encode(s.reshard); err != nil {
 		return errors.New("encode reshard fails: " + err.Error()), nil
 	}
@@ -277,7 +282,8 @@ func (s *server) restore(snapshot []byte) error {
 	var ht map[string]string
 
 	var configId int32
-	var inConfiguration bool
+	var noGroupsAliveBefore bool
+	var reshard bool
 	var shards map[int]byte
 	var shardsToGet map[int]byte
 	var shardsToTransfer map[int32][]int
@@ -296,7 +302,10 @@ func (s *server) restore(snapshot []byte) error {
 	if err = d.Decode(&configId); err != nil {
 		return errors.New("decode currentConfigId fails: " + err.Error())
 	}
-	if err = d.Decode(&inConfiguration); err != nil {
+	if err = d.Decode(&noGroupsAliveBefore); err != nil {
+		return errors.New("decode noGroupsAliveBefore fails: " + err.Error())
+	}
+	if err = d.Decode(&reshard); err != nil {
 		return errors.New("decode reshard fails: " + err.Error())
 	}
 	if err = d.Decode(&shards); err != nil {
@@ -317,7 +326,8 @@ func (s *server) restore(snapshot []byte) error {
 	s.ht = ht
 
 	s.currentConfigId = configId
-	s.reshard = inConfiguration
+	s.noGroupsAliveBefore = noGroupsAliveBefore
+	s.reshard = reshard
 	s.shards = shards
 	s.shardsToGet = shardsToGet
 	s.shardsToTransfer = shardsToTransfer
@@ -358,11 +368,14 @@ func (s *server) Get(_ context.Context, args *shardproto.GetRequest) (*shardprot
 		CommandType: commandType_Get,
 	}
 	reply := &shardproto.GetReply{}
-	errCode := s.submit(c)
+
+	errcode := s.submit(c)
 	value := ""
 	exist := false
-	if errCode == shardproto.ResponseCode_OK {
-		shard := router.Key2Shard(args.Key)
+
+	fmt.Printf("errcode=%v, target=%v, %v", errcode, shardproto.ResponseCode_OK, errcode == shardproto.ResponseCode_OK)
+	if errcode == shardproto.ResponseCode_OK {
+		shard := router.Key2Shard(key)
 		shardMu := s.shardMu
 		// check if shard exists first, then fetch the data
 		// 1. the group which receives the data, will save data first, then update shards
@@ -372,44 +385,53 @@ func (s *server) Get(_ context.Context, args *shardproto.GetRequest) (*shardprot
 		// but the cluster starts to transfer shards and deletes the data quickly, the value read is an empty string
 		shardMu.Lock()
 		if _, exist = s.shards[shard]; exist {
-			value, exist = s.ht[c.Key]
-			if exist {
-				reply.Exist = true
-				reply.Value = value
-			} else {
-				reply.ErrCode = shardproto.ResponseCode_KEY_NOT_EXISTS
+			value, exist = s.ht[key]
+			if !exist {
+				errcode = shardproto.ResponseCode_KEY_NOT_EXISTS
 			}
 		} else {
-			reply.ErrCode = shardproto.ResponseCode_WRONG_GROUP
+			errcode = shardproto.ResponseCode_WRONG_GROUP
 		}
 		shardMu.Unlock()
 	}
-	errmsg := reply.ErrCode.String()
+	errmsg := errcode.String()
+	reply.Value = value
+	reply.Exist = exist
+	reply.ErrCode = errcode
 	reply.ErrMessage = errmsg
-	s.logPrintf("handleClientUpdateRequest", "query key=%s, value=%s, exist=%v, errmsg=%s", key, value, exist, errmsg)
+	s.logPrintf("Get", "query key=%s, value=%s, exist=%v, errcode=%d, errerrmsg=%s", key, value, exist, errcode, errmsg)
 	return reply, nil
 }
 
 func (s *server) Set(_ context.Context, args *shardproto.SetRequest) (*shardproto.SetReply, error) {
+	key := args.Key
+	value := args.Value
 	c := command{
 		CommandType: commandType_Set,
-		Key:         args.Key,
-		Value:       args.Value,
+		Key:         key,
+		Value:       value,
 	}
 	reply := &shardproto.SetReply{}
-	reply.ErrCode = s.submit(c)
-	reply.ErrMessage = reply.ErrCode.String()
+	errcode := s.submit(c)
+	errmsg := errcode.String()
+	reply.ErrCode = errcode
+	reply.ErrMessage = errmsg
+	s.logPrintf("Set", "set key=%s, value=%s, errcode=%d, errerrmsg=%s", key, value, errcode, errmsg)
 	return reply, nil
 }
 
 func (s *server) Delete(_ context.Context, args *shardproto.DeleteRequest) (*shardproto.DeleteReply, error) {
+	key := args.Key
 	c := command{
 		CommandType: commandType_Delete,
-		Key:         args.Key,
+		Key:         key,
 	}
 	reply := &shardproto.DeleteReply{}
-	reply.ErrCode = s.submit(c)
-	reply.ErrMessage = reply.ErrCode.String()
+	errcode := s.submit(c)
+	errmsg := errcode.String()
+	reply.ErrCode = errcode
+	reply.ErrMessage = errmsg
+	s.logPrintf("Delete", "set key=%s, errcode=%d, errerrmsg=%s", key, errcode, errmsg)
 	return reply, nil
 }
 
@@ -451,7 +473,7 @@ func (s *server) configure(ownShards map[int]byte, currentGroup int32, configId 
 		ReplicaGroups:    replicaGroups,
 	}
 	responseCode := s.submit(c)
-	s.logPrintf("configure", "submit configId:%d, responseCode=%s", responseCode.String())
+	s.logPrintf("configure", "submit configId:%d, responseCode=%s", configId, responseCode.String())
 }
 
 func (s *server) deleteShards(configId int32, groupId int32, keys []string) bool {
@@ -497,8 +519,6 @@ func (s *server) submit(command command) shardproto.ResponseCode {
 		return shardproto.ResponseCode_OK
 	}
 	switch receivedTerm {
-	case keyNotExistsCommandTerm:
-		return shardproto.ResponseCode_KEY_NOT_EXISTS
 	case wrongGroupTerm:
 		return shardproto.ResponseCode_WRONG_GROUP
 	case configMismatchTerm:
@@ -508,7 +528,7 @@ func (s *server) submit(command command) shardproto.ResponseCode {
 	}
 }
 
-func (s *server) listenConfig(routerClient *router.ServiceClient) {
+func (s *server) listenConfig(routerClient *router.ListenerClient) {
 	shardMu := s.shardMu
 	groupId := s.groupId
 	for {
@@ -522,9 +542,9 @@ func (s *server) listenConfig(routerClient *router.ServiceClient) {
 		if !reshard {
 			config, err := routerClient.Query(nextConfigId)
 			if err != nil {
-				s.logPrintf("listenConfig", "query fail: %v", err)
+				//s.logPrintf("listenConfig", "query fail: %v", err)
 			} else {
-				s.logPrintf("listenConfig", "get config: %v", config)
+				//s.logPrintf("listenConfig", "get config: %v", config)
 				if config.ConfigId == nextConfigId {
 					shardMu.Lock()
 					if s.currentConfigId+1 != nextConfigId {
@@ -532,16 +552,13 @@ func (s *server) listenConfig(routerClient *router.ServiceClient) {
 					} else {
 						shards := copyShards(s.shards)
 						shardMu.Unlock()
-
-						replicaGroups := make(map[int32][]string)
-						for gid, servers := range config.ReplicaGroups {
-							replicaGroups[gid] = servers.Servers
-						}
+						replicaGroups := config.ReplicaGroups
 						s.configure(shards, groupId, config.ConfigId, config.ShardsMap, replicaGroups)
 					}
 				}
 			}
 		}
+		time.Sleep(300 * time.Millisecond)
 	}
 }
 
@@ -610,7 +627,7 @@ func (s *server) transferShards() {
 
 				cancel := false
 				if len(addrs) > 0 {
-					client := MakeServiceClient(addrs)
+					client := MakeDataTransferClient(addrs)
 					int32Shards := make([]int32, len(shards))
 					for i, shard := range shards {
 						int32Shards[i] = int32(shard)
@@ -631,7 +648,7 @@ func (s *server) transferShards() {
 
 					err := client.Transfer(configId, int32Shards, data)
 					for err != nil {
-						time.Sleep(200 * time.Millisecond)
+						time.Sleep(300 * time.Millisecond)
 						if !s.isLeader() {
 							cancel = true
 							time.Sleep(500 * time.Millisecond)
@@ -772,8 +789,8 @@ func (s *server) replyClientIfNeeded(commandIndex int, commandTerm int) {
 func (s *server) handleClientUpdateRequest(ct commandType, key string, value string) bool {
 	shardMu := s.shardMu
 	shard := router.Key2Shard(key)
-	shardMu.Lock()
 	if _, exist := s.shards[shard]; exist {
+		shardMu.Lock()
 		if ct == commandType_Set {
 			s.ht[key] = value
 			s.logPrintf("handleClientUpdateRequest", "set %s -> %s", key, value)
@@ -781,12 +798,12 @@ func (s *server) handleClientUpdateRequest(ct commandType, key string, value str
 			delete(s.ht, key)
 			s.logPrintf("handleClientUpdateRequest", "delete key %s", key)
 		}
+		shardMu.Unlock()
 	} else {
 		s.logPrintf("handleClientUpdateRequest", "wrong group, commandType=%v, key=%s, shard=%d, "+
 			"current group is responsible for shards:%v", ct, key, shard, s.shards)
 		return false
 	}
-	shardMu.Unlock()
 	return true
 }
 
@@ -795,20 +812,18 @@ func (s *server) handleConfig(configId int32, shardsToGet map[int]byte, shardsTo
 	if configId > nextConfigId {
 		s.logFatalf("[%s] expected nextConfigId=%d, but received configId=%d "+s.shardInfo(), s.shardkvId, nextConfigId, configId)
 	} else if configId == nextConfigId {
-
 		if !s.reshard {
 			shardMu := s.shardMu
 			shardMu.Lock()
+			defer shardMu.Unlock()
 			shards := s.shards
-			if configId == 1 {
-				// no shards to transfer when use initial configuration
-				for shard := range shardsToGet {
-					shards[shard] = 1
-				}
-				s.logPrintf("handleConfig", "switch to initial configuration, configId=%d, responsible for shards:%v currently",
-					configId, s.shards)
-			} else {
-				if len(shardsToGet) != 0 || len(shardsToTransfer) != 0 {
+			if len(shardsToGet) != 0 || len(shardsToTransfer) != 0 {
+				if s.noGroupsAliveBefore {
+					// There are no existing shards before this, so no need to wait for other groups to transfer shards.
+					for shard := range shardsToGet {
+						shards[shard] = 1
+					}
+				} else {
 					s.reshard = true
 					for _, shardsToMove := range shardsToTransfer {
 						for _, shard := range shardsToMove {
@@ -823,11 +838,11 @@ func (s *server) handleConfig(configId int32, shardsToGet map[int]byte, shardsTo
 						s.transferCond.Signal()
 					}
 				}
-				s.logPrintf("handleConfig", "switch to next configuration, configId=%d, ", configId)
-				s.logPrintf("handleConfig", s.shardInfo())
 			}
+			s.noGroupsAliveBefore = len(replicaGroups) == 0
+			s.logPrintf("handleConfig", "switch to next configuration, configId=%d, ", configId)
+			s.logPrintf("handleConfig", s.shardInfo())
 			s.currentConfigId = configId
-			shardMu.Unlock()
 		}
 
 	} // else... stale configuration
@@ -835,8 +850,10 @@ func (s *server) handleConfig(configId int32, shardsToGet map[int]byte, shardsTo
 
 func (s *server) handleShardsTransfer(configId int32, transferredShards []int32, data map[string]string) bool {
 	if configId > s.currentConfigId {
+		s.logPrintf("handleShardsTransfer", "refuse shards transfer for configId=%d, currentConfigId=%d", configId, s.currentConfigId)
 		return false
-	} else if configId == s.currentConfigId {
+	}
+	if configId == s.currentConfigId {
 		duplicate := false
 		shards := s.shards
 		for _, shard := range transferredShards {
@@ -852,15 +869,16 @@ func (s *server) handleShardsTransfer(configId int32, transferredShards []int32,
 			for k, v := range data {
 				s.ht[k] = v
 			}
-			shardsToGet := s.shardsToGet
-			for _, shard := range shards {
+			for _, shard := range transferredShards {
 				shards[int(shard)] = 1
-				delete(shardsToGet, int(shard))
-			}
-			if len(s.shardsToTransfer) == 0 && len(s.shardsToGet) == 0 {
-				s.reshard = false
+				delete(s.shardsToGet, int(shard))
 			}
 			s.logPrintf("handleShardsTransfer", "accepts data for shards:%v in configId:%d", transferredShards, configId)
+
+			if len(s.shardsToTransfer) == 0 && len(s.shardsToGet) == 0 {
+				s.logPrintf("handleShardsTransfer", "finishes reshard in configId=%d", configId)
+				s.reshard = false
+			}
 			s.logPrintf("handleShardsTransfer", s.shardInfo())
 			shardMu.Unlock()
 		}
@@ -877,6 +895,7 @@ func (s *server) handleShardsDelete(configId int32, transferredGroupId int32, ke
 		if shards, exist := s.shardsToTransfer[transferredGroupId]; exist {
 			shardMu := s.shardMu
 			shardMu.Lock()
+			defer shardMu.Unlock()
 			delete(s.shardsToTransfer, transferredGroupId)
 			for _, key := range keys {
 				delete(s.ht, key)
@@ -886,7 +905,6 @@ func (s *server) handleShardsDelete(configId int32, transferredGroupId int32, ke
 			if len(s.shardsToTransfer) == 0 && len(s.shardsToGet) == 0 {
 				s.reshard = false
 			}
-			shardMu.Unlock()
 		}
 	} // else... stale delete
 }
