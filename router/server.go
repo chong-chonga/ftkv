@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/kvservice/v1/raft"
-	"github.com/kvservice/v1/router/protobuf"
-	"github.com/kvservice/v1/tool"
+	"github.com/ftkv/v1/raft"
+	"github.com/ftkv/v1/router/routerproto"
+	"github.com/ftkv/v1/storage"
+	"github.com/ftkv/v1/tool"
 	"google.golang.org/grpc"
 	"gopkg.in/yaml.v3"
 	"log"
@@ -18,29 +19,21 @@ import (
 )
 import "sync"
 
-const shardsCount = 1 << 4
-
-type clusterConfig struct {
-	ConfigId      int32
-	ShardsMap     []int32
-	ReplicaGroups map[int32][]string
-}
-
 type server struct {
-	protobuf.RouterServer
+	routerproto.RouterServer
 
-	channelMu sync.Mutex
-
-	routerId         string
+	channelMu        sync.Mutex
 	logEnabled       bool
 	maxRaftStateSize int
 	rf               *Raft
 	applyCh          chan applyMsg
-	storage          *tool.Storage
+	storage          *storage.Storage
 	waitingClients   map[int]chan commitResult
 
+	routerId string
+	// persistent
 	snapshotIndex int
-	configs       []clusterConfig
+	configs       []ClusterConfig
 	shardsMap     []int32
 	replicaGroups map[int32][]string
 }
@@ -66,7 +59,14 @@ func readServerConfig(config []byte) (*ServerConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &conf.ServerConfig, nil
+	serverConfig := &conf.ServerConfig
+	if serverConfig.Port == 0 {
+		return nil, errors.New("port is not configured")
+	}
+	if len(serverConfig.RouterId) == 0 {
+		return nil, errors.New("routerId is not configured")
+	}
+	return serverConfig, nil
 }
 
 type StopFunc func()
@@ -86,25 +86,22 @@ func StartRouterServer(configData []byte) (string, StopFunc, error) {
 	}
 	routerId := config.RouterId
 	serviceName := "router-" + routerId
-	storage, err := tool.MakeStorage(serviceName)
+	storage, err := storage.MakeStorage(serviceName)
 	if err != nil {
 		return "", nil, &tool.RuntimeError{Stage: "make storage", Err: err}
 	}
 
 	rt := new(server)
-	rt.routerId = routerId
-
 	snapshot := storage.GetSnapshot()
 	if nil != snapshot && len(snapshot) > 0 {
 		if err = rt.restore(snapshot); err != nil {
 			return "", nil, &tool.RuntimeError{Stage: "restore", Err: err}
 		}
 	} else {
-		rt.shardsMap = make([]int32, shardsCount)
-		rt.replicaGroups = make(map[int32][]string)
-		rt.snapshotIndex = 0
-		rt.makeNewConfig()
+		rt.initPersistentState()
 	}
+	rt.routerId = routerId
+
 	rt.storage = storage
 	rt.waitingClients = make(map[int]chan commitResult)
 
@@ -144,18 +141,21 @@ func StartRouterServer(configData []byte) (string, StopFunc, error) {
 	go rt.executeCommands()
 
 	// start grpc server
-	server := grpc.NewServer()
-	protobuf.RegisterRouterServer(server, rt)
+	s := grpc.NewServer()
+	routerproto.RegisterRouterServer(s, rt)
 	go func() {
-		_ = server.Serve(listener)
+		_ = s.Serve(listener)
 	}()
 
 	log.Printf("start router server success, serviceName=%s, serves at port:%d", serviceName, port)
-	return serviceName, server.Stop, nil
+	return serviceName, s.Stop, nil
 }
 
-func (s *server) GetServiceName() {
-
+func (s *server) initPersistentState() {
+	s.shardsMap = make([]int32, shardsCount)
+	s.replicaGroups = make(map[int32][]string)
+	s.snapshotIndex = 0
+	s.makeNewConfig()
 }
 
 func (s *server) logPrintf(printInfo bool, method string, format string, a ...interface{}) {
@@ -211,7 +211,7 @@ func (s *server) restore(snapshot []byte) error {
 	}
 	r := bytes.NewBuffer(snapshot)
 	d := json.NewDecoder(r)
-	var configs []clusterConfig
+	var configs []ClusterConfig
 	var shardsMap []int32
 	var replicaGroups map[int32][]string
 	var snapshotIndex int
@@ -237,19 +237,19 @@ func (s *server) restore(snapshot []byte) error {
 }
 
 type commitResult struct {
-	term        int
-	queryResult *clusterConfig
+	term   int
+	result *ClusterConfig
 }
 
-// Query queries the clusterConfig corresponding to the number.
+// Query queries the ClusterConfig corresponding to the number.
 // Its argument is a configuration number.
 // If the number is -1 or bigger than the biggest known configuration number, the server replies with the latest configuration.
 // The result of Query(-1) will reflect every Join, Leave, or Move RPC that the server finished handling before it received the Query(-1) RPC.
-func (s *server) Query(c context.Context, args *protobuf.QueryRequest) (*protobuf.QueryReply, error) {
-	reply := &protobuf.QueryReply{}
+func (s *server) Query(_ context.Context, args *routerproto.QueryRequest) (*routerproto.QueryReply, error) {
+	reply := &routerproto.QueryReply{}
 
 	configId := args.ConfigId
-	if ok, errcode, errmsg := protobuf.ValidateConfigId(configId); !ok {
+	if ok, errcode, errmsg := routerproto.ValidateConfigId(configId); !ok {
 		reply.ErrCode = errcode
 		reply.ErrMessage = errmsg
 		return reply, nil
@@ -262,36 +262,37 @@ func (s *server) Query(c context.Context, args *protobuf.QueryRequest) (*protobu
 
 	errCode, queryRes := s.submit(op)
 
-	if errCode == protobuf.ErrCode_ERR_CODE_OK {
-		replicaGroups := make(map[int32]*protobuf.Servers)
+	if errCode == routerproto.ErrCode_ERR_CODE_OK {
+		replicaGroups := make(map[int32]*routerproto.Servers)
 		for gid, servers := range queryRes.ReplicaGroups {
-			replicaGroups[gid] = &protobuf.Servers{
+			replicaGroups[gid] = &routerproto.Servers{
 				Servers: servers,
 			}
 		}
-		reply.ConfigWrapper = &protobuf.ClusterConfigWrapper{
+		reply.ConfigWrapper = &routerproto.ClusterConfigWrapper{
 			ConfigId:      queryRes.ConfigId,
 			ShardsMap:     queryRes.ShardsMap,
 			ReplicaGroups: replicaGroups,
 		}
 	}
 	reply.ErrCode = errCode
+	reply.ErrMessage = errCode.String()
 	return reply, nil
 }
 
 // Join add new replica groups and re-sharding.
 // Its argument is a set of mappings from unique, non-zero replica group identifiers (GIDs) to lists of server names.
-// server will move as few shards as possible to divide the shards as evenly as possible among the groups and create a new clusterConfig.
+// server will move as few shards as possible to divide the shards as evenly as possible among the groups and create a new ClusterConfig.
 // server allow re-use of a GID if it's not part of the current configuration (i.e. a GID should be allowed to Join, then Leave, then Join again).
 // If the added GIDs already exists, it will overwrite the current replica groups.
-func (s *server) Join(c context.Context, args *protobuf.JoinRequest) (*protobuf.JoinReply, error) {
-	reply := &protobuf.JoinReply{}
+func (s *server) Join(_ context.Context, args *routerproto.JoinRequest) (*routerproto.JoinReply, error) {
+	reply := &routerproto.JoinReply{}
 
 	replicaGroups := make(map[int32][]string)
 	for groupId, serverGroup := range args.ReplicaGroups {
 		replicaGroups[groupId] = serverGroup.GetServers()
 	}
-	if ok, errcode, errmsg := protobuf.ValidateReplicaGroups(replicaGroups); !ok {
+	if ok, errcode, errmsg := routerproto.ValidateReplicaGroups(replicaGroups); !ok {
 		reply.ErrCode = errcode
 		reply.ErrMessage = errmsg
 		return reply, nil
@@ -302,18 +303,19 @@ func (s *server) Join(c context.Context, args *protobuf.JoinRequest) (*protobuf.
 	}
 
 	reply.ErrCode, _ = s.submit(op)
+	reply.ErrMessage = reply.ErrCode.String()
 	return reply, nil
 }
 
 // Leave remove replica groups and re-sharding.
 // Its argument is a list of GIDs of previously joined groups.
-// server will move as few shards as possible to divide the shards as evenly as possible among the groups and create a new clusterConfig.
+// server will move as few shards as possible to divide the shards as evenly as possible among the groups and create a new ClusterConfig.
 // If the specified GIDs does not exist, no action will be taken.
 // If there are no remaining groups, then all the shards are assigned to GID0.
-func (s *server) Leave(c context.Context, args *protobuf.LeaveRequest) (*protobuf.LeaveReply, error) {
-	reply := &protobuf.LeaveReply{}
+func (s *server) Leave(_ context.Context, args *routerproto.LeaveRequest) (*routerproto.LeaveReply, error) {
+	reply := &routerproto.LeaveReply{}
 	groupIds := args.GroupIds
-	if ok, errcode, errmsg := protobuf.ValidateGroupIds(groupIds); !ok {
+	if ok, errcode, errmsg := routerproto.ValidateGroupIds(groupIds); !ok {
 		reply.ErrCode = errcode
 		reply.ErrMessage = errmsg
 		return reply, nil
@@ -324,14 +326,15 @@ func (s *server) Leave(c context.Context, args *protobuf.LeaveRequest) (*protobu
 	}
 
 	reply.ErrCode, _ = s.submit(op)
+	reply.ErrMessage = reply.ErrCode.String()
 	return reply, nil
 }
 
-func (s *server) submit(command command) (protobuf.ErrCode, *clusterConfig) {
+func (s *server) submit(command command) (routerproto.ErrCode, *ClusterConfig) {
 	commandIndex, commandTerm, isLeader := s.rf.Start(command)
 	if !isLeader {
 		s.logPrintf(false, "submit", "not leader, refuse command:%s", command.CommandString())
-		return protobuf.ErrCode_ERR_CODE_WRONG_LEADER, nil
+		return routerproto.ErrCode_ERR_CODE_WRONG_LEADER, nil
 	}
 	// leader1(current leader) may be partitioned by itself,
 	// its log may be trimmed by leader2 (if and only if leader2's term > leader1's term)
@@ -354,12 +357,12 @@ func (s *server) submit(command command) (protobuf.ErrCode, *clusterConfig) {
 	res := <-ch
 
 	receivedTerm := res.term
-	s.logPrintf(false, "submit", "expected commandTerm=%d for commandIndex=%d, received commandTerm=%d, config=%v", commandTerm, commandIndex, receivedTerm, res.queryResult)
+	s.logPrintf(false, "submit", "expected commandTerm=%d for commandIndex=%d, received commandTerm=%d, config=%v", commandTerm, commandIndex, receivedTerm, res.result)
 	// log's index and term identifies the unique log
 	if receivedTerm == commandTerm {
-		return protobuf.ErrCode_ERR_CODE_OK, res.queryResult
+		return routerproto.ErrCode_ERR_CODE_OK, res.result
 	} else {
-		return protobuf.ErrCode_ERR_CODE_WRONG_LEADER, nil
+		return routerproto.ErrCode_ERR_CODE_WRONG_LEADER, nil
 	}
 }
 
@@ -392,8 +395,10 @@ func (s *server) shardGroups() []shardGroup {
 		shardsMap[gid] = make([]int, 0)
 	}
 	for shard, gid := range s.shardsMap {
-		shardsForG := shardsMap[gid]
-		shardsMap[gid] = append(shardsForG, shard)
+		shardsForG, groupExist := shardsMap[gid]
+		if groupExist {
+			shardsMap[gid] = append(shardsForG, shard)
+		}
 	}
 
 	var shardGroups byShardCount
@@ -423,9 +428,6 @@ func (s *server) balanceJoin(groups map[int32][]string) bool {
 		s.logPrintf(true, "balanceJoin", "groups:%v already exist!", groups)
 		return false
 	}
-	if groupsToJoin > 0 {
-		sort.Ints(groupsToDistribute)
-	}
 
 	var shardsToDistribute []int
 	groupsBeforeJoin := len(s.replicaGroups)
@@ -433,15 +435,14 @@ func (s *server) balanceJoin(groups map[int32][]string) bool {
 
 	// only re-sharding if the number of groups changes
 	if groupsToJoin != 0 {
-		shardCount := shardsCount
-		if groupsBeforeJoin == 0 || groupsBeforeJoin < shardCount {
+		sort.Ints(groupsToDistribute)
+		if groupsBeforeJoin == 0 || groupsBeforeJoin < shardsCount {
 			if groupsBeforeJoin == 0 {
 				shardsToDistribute = allShards(shardsCount)
 			} else {
 				shardGroups := s.shardGroups()
-
-				avg := shardCount / groupsAfterJoin
-				mod := shardCount % groupsAfterJoin
+				avg := shardsCount / groupsAfterJoin
+				mod := shardsCount % groupsAfterJoin
 				for i := len(shardGroups) - 1; i >= 0; i-- {
 					shards := shardGroups[i].shards
 					n := len(shards)
@@ -495,7 +496,7 @@ func sameServers(servers1 []string, servers2 []string) bool {
 
 func (s *server) balanceLeave(groupIds []int32) bool {
 	if len(groupIds) == 0 {
-		s.logPrintf(false, "balanceLeave", "empty groups!")
+		s.logPrintf(false, "balanceLeave", "empty group ids")
 		return false
 	}
 	leaveIdMap := make(map[int32]byte)
@@ -519,25 +520,28 @@ func (s *server) balanceLeave(groupIds []int32) bool {
 	var groupsToDistribute []int
 	var shardsToDistribute []int
 
-	if groupsToLeave != 0 {
-		if groupsAfterLeave == 0 {
-			// no groups, then GID0 serve all shards
-			groupsToDistribute = append(groupsToDistribute, 0)
-			shardsToDistribute = allShards(shardsCount)
-		} else {
-			shardGroups := s.shardGroups()
-			for _, shardGroup := range shardGroups {
-				gid := shardGroup.gid
-				if _, inLeaveGroup := leaveIdMap[gid]; inLeaveGroup {
-					shardsToDistribute = append(shardsToDistribute, shardGroup.shards...)
-				} else {
-					groupsToDistribute = append(groupsToDistribute, int(gid))
+	s.logPrintf(true, "balanceLeave", "there are %d groups before leave groups:%v", groupsBeforeLeave, groupIds)
+
+	if groupsAfterLeave == 0 {
+		// no groups alive, clear shardsMap
+		for i := range s.shardsMap {
+			s.shardsMap[i] = 0
+		}
+	} else {
+		shardGroups := s.shardGroups()
+		for _, group := range shardGroups {
+			gid := group.gid
+			// if a group leaves, add its shards to shardsToDistribute
+			// else add group id to groupsToDistribute
+			if _, inLeaveGroup := leaveIdMap[gid]; inLeaveGroup {
+				if len(group.shards) > 0 {
+					shardsToDistribute = append(shardsToDistribute, group.shards...)
 				}
+			} else {
+				groupsToDistribute = append(groupsToDistribute, int(gid))
 			}
 		}
 	}
-
-	s.logPrintf(true, "balanceLeave", "there are %d groups before leave groups:%v", groupsBeforeLeave, groupIds)
 	if len(shardsToDistribute) > 0 {
 		s.distributeShards(shardsToDistribute, groupsToDistribute)
 	}
@@ -559,6 +563,7 @@ func allShards(shardCount int) []int {
 }
 
 // distributeShards distribute the given shards to the specified groups evenly
+// groupsToDistribute: group ids, sort by shard counts, asc
 func (s *server) distributeShards(shardsToDistribute []int, groupsToDistribute []int) {
 	groups := len(groupsToDistribute)
 	avg := len(shardsToDistribute) / groups
@@ -586,14 +591,14 @@ func (s *server) makeNewConfig() {
 	replicaGroupsCopy := make(map[int32][]string)
 	for gid, servers := range s.replicaGroups {
 		serversCopy := make([]string, len(servers))
-		for i, server := range servers {
-			serversCopy[i] = server
+		for i, serverAddr := range servers {
+			serversCopy[i] = serverAddr
 		}
 		replicaGroupsCopy[gid] = serversCopy
 	}
 
 	id := len(s.configs)
-	c := clusterConfig{
+	c := ClusterConfig{
 		ConfigId:      int32(id),
 		ShardsMap:     shardsMapCopy,
 		ReplicaGroups: replicaGroupsCopy,
@@ -638,27 +643,38 @@ func (s *server) executeCommands() {
 				log.Fatalf("[%s] expected log inedx is %d, but received is %d, applyMsg=%v", s.routerId, expectedIndex, commandIndex, msg)
 			}
 			expectedIndex++
-			command := msg.Command
-			s.logPrintf(false, "executeCommands", "receive committed command:%s", command.CommandString())
-			commandType := command.CommandType
-			if commandType != commandType_Query {
+			c := msg.Command
+			ct := c.CommandType
+			s.logPrintf(false, "executeCommands", "receive committed command:%s", c.CommandString())
+			var result *ClusterConfig = nil
+			if ct == commandType_Query {
+				configId := c.ConfigId
+				idx := int(configId)
+				// If the number is -1 or bigger than the biggest known configuration number, query the latest configuration.
+				if configId == routerproto.LatestConfigId || int(configId) >= len(s.configs) {
+					idx = len(s.configs) - 1
+				}
+				if idx >= 0 && idx < len(s.configs) {
+					result = &s.configs[idx]
+				}
+			} else {
 				var configChanges bool
-				if commandType_Join == commandType {
-					configChanges = s.balanceJoin(command.ReplicaGroups)
-				} else if commandType_Leave == commandType {
-					configChanges = s.balanceLeave(command.GroupIds)
+				if commandType_Join == ct {
+					configChanges = s.balanceJoin(c.ReplicaGroups)
+				} else if commandType_Leave == ct {
+					configChanges = s.balanceLeave(c.GroupIds)
 				} else {
-					log.Fatalf("[%s] receive unknown type operation, command:%s", s.routerId, command.CommandString())
+					log.Fatalf("[%s] receive unknown type operation, command:%s", s.routerId, c.CommandString())
 				}
 				if configChanges {
 					s.makeNewConfig()
 				}
-				//// used for test
-				//if commandType_Join == commandType || commandType_Leave == commandType {
-				//	s.check()
-				//}
 			}
-			s.replyClientIfNeeded(commandIndex, msg.CommandTerm, commandType, command)
+			//// used for test
+			//if commandType_Join == commandType || commandType_Leave == commandType {
+			//	s.check()
+			//}
+			s.replyClientIfNeeded(commandIndex, msg.CommandTerm, result)
 			if enableSnapshot && s.storage.RaftStateSize() >= maxRaftStateSize {
 				s.snapshotIndex = commandIndex
 				err, snapshot := s.makeSnapshot()
@@ -677,6 +693,11 @@ func (s *server) executeCommands() {
 			if snapshotIndex != msg.SnapshotIndex {
 				log.Fatalf("[%s] service snapshot index is %d, but Raft snapshot index is %d", s.routerId, snapshotIndex, msg.SnapshotIndex)
 			}
+			// 2023-05-26 bug：raft稳定通过测试的前提下，出现snapshotIndex < expectedIndex，且snapshotIndex=expectedIndex - 1。猜测是server
+			//更新snapshotIndex 、expectedIndex逻辑有问题/raft install snapshot存在问题
+			// 修改方案：
+			// 1. 将service安装snapshot的条件修改为 snapshotIndex >= expectedIndex
+			// 2. 将raft接受snapshot的条件修改为 snapshotIndex > lastApplied
 			if snapshotIndex < expectedIndex {
 				log.Fatalf("[%s] received snapshot is out-dated, expected log index=%d, received snapshot index=%d", s.routerId, expectedIndex, snapshotIndex)
 			}
@@ -687,25 +708,13 @@ func (s *server) executeCommands() {
 	}
 }
 
-func (s *server) replyClientIfNeeded(commandIndex int, commandTerm int, commandType commandType, command command) {
+func (s *server) replyClientIfNeeded(commandIndex int, commandTerm int, result *ClusterConfig) {
 	s.channelMu.Lock()
 	if ch, _ := s.waitingClients[commandIndex]; ch != nil {
-		var config *clusterConfig = nil
-		if commandType == commandType_Query {
-			configId := command.ConfigId
-			idx := int(configId)
-			// If the number is -1 or bigger than the biggest known configuration number, query the latest configuration.
-			if configId == protobuf.LatestConfigId || int(configId) >= len(s.configs) {
-				idx = len(s.configs) - 1
-			}
-			if idx >= 0 && idx < len(s.configs) {
-				config = &s.configs[idx]
-			}
-		}
-		s.logPrintf(false, "executeCommands", "send commandTerm=%d for commandIndex=%d, config=%v", commandTerm, commandIndex, config)
+		s.logPrintf(false, "executeCommands", "send commandTerm=%d for commandIndex=%d, config=%v", commandTerm, commandIndex, result)
 		ch <- commitResult{
-			term:        commandTerm,
-			queryResult: config,
+			term:   commandTerm,
+			result: result,
 		}
 		close(ch)
 		delete(s.waitingClients, commandIndex)
