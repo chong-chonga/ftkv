@@ -72,7 +72,7 @@ func valid(queryIP string) bool {
 }
 
 func ChooseServer(lastLeader int, serverCount int) int {
-	if lastLeader != -1 {
+	if lastLeader >= 0 && lastLeader < serverCount {
 		return lastLeader
 	} else {
 		x := rand.Intn(serverCount)

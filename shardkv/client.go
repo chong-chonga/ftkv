@@ -73,9 +73,7 @@ func MakeClient(configData []byte) (*Client, error) {
 	} else if timeout == 0 {
 		log.Printf("configure shardkv client info: using default timeout=%dms", defaultTimeout)
 	}
-
-	log.Printf("router client info: routerAddresses:%v, timeout=%dms, logEnabled=%v", routerAddresses, timeout,
-		clientConfig.LogEnabled)
+	log.Printf("configure shardkv client info: routerAddresses:%v, timeout=%dms, logEnabled=%v", routerAddresses, timeout, clientConfig.LogEnabled)
 	client := &Client{
 		routerClient: routerClient,
 		lastLeader:   -1,

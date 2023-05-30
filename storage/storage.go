@@ -1,8 +1,8 @@
-package tool
+package storage
 
 import (
 	"bufio"
-	"github.com/pkg/errors"
+	"errors"
 	"io"
 	"io/fs"
 	"log"
@@ -35,13 +35,13 @@ import (
 // hint: The MakeStorage method will perform an initial read to determine the version number used in the next persistence raft state.
 // The version number will increase each time persistence of the raft state.
 
-type StorageError struct {
+type ReadWriteError struct {
 	Op     string
 	Target string
 	Err    error
 }
 
-func (s *StorageError) Error() string {
+func (s *ReadWriteError) Error() string {
 	return s.Op + " " + s.Target + ":" + s.Err.Error()
 }
 
@@ -141,17 +141,17 @@ func (s *Storage) readRaftStateFile() ([]byte, int64, error) {
 	var version int64 = 0
 	file, err := openIfExists(s.raftStatePath)
 	if err != nil {
-		return nil, -1, &StorageError{Op: "read", Target: "raft state", Err: err}
+		return nil, -1, &ReadWriteError{Op: "read", Target: "raft state", Err: err}
 	}
 	if file != nil {
 		reader := bufio.NewReader(file)
 		err = checkFileHeader(reader)
 		if err != nil {
-			return nil, -1, &StorageError{Op: "read", Target: "raft state", Err: err}
+			return nil, -1, &ReadWriteError{Op: "read", Target: "raft state", Err: err}
 		}
 		raftState, version, err = s.readRaftState(reader)
 		if err != nil {
-			return nil, -1, &StorageError{Op: "read", Target: "raft state", Err: err}
+			return nil, -1, &ReadWriteError{Op: "read", Target: "raft state", Err: err}
 		}
 		// close will return an error if it has already been called, ignore
 		_ = file.Close()
@@ -165,21 +165,21 @@ func (s *Storage) readSnapshotFile() ([]byte, int64, []byte, error) {
 	var snapshot []byte
 	file, err := openIfExists(s.snapshotPath)
 	if err != nil {
-		return nil, -1, nil, &StorageError{Op: "read", Target: "raft state and snapshot", Err: err}
+		return nil, -1, nil, &ReadWriteError{Op: "read", Target: "raft state and snapshot", Err: err}
 	}
 	if file != nil {
 		reader := bufio.NewReader(file)
 		err = checkFileHeader(reader)
 		if err != nil {
-			return nil, -1, nil, &StorageError{Op: "read", Target: "raft state and snapshot", Err: err}
+			return nil, -1, nil, &ReadWriteError{Op: "read", Target: "raft state and snapshot", Err: err}
 		}
 		raftState, version, err = s.readRaftState(reader)
 		if err != nil {
-			return nil, -1, nil, &StorageError{Op: "read", Target: "raft state and snapshot", Err: err}
+			return nil, -1, nil, &ReadWriteError{Op: "read", Target: "raft state and snapshot", Err: err}
 		}
 		snapshot, err = s.readSnapshot(reader)
 		if err != nil {
-			return nil, -1, nil, &StorageError{Op: "read", Target: "raft state and snapshot", Err: err}
+			return nil, -1, nil, &ReadWriteError{Op: "read", Target: "raft state and snapshot", Err: err}
 		}
 		// close will return an error if it has already been called, ignore
 		_ = file.Close()
@@ -271,7 +271,7 @@ func (ew *errWriter) flushAndRename(path string) error {
 func (s *Storage) SaveRaftState(state []byte) error {
 	tmpFile, err := os.CreateTemp("", "raft*.rf")
 	if err != nil {
-		err = &StorageError{Op: "save", Target: "raft state", Err: err}
+		err = &ReadWriteError{Op: "save", Target: "raft state", Err: err}
 		return err
 	}
 	writer := newErrWriter(tmpFile)
@@ -279,7 +279,7 @@ func (s *Storage) SaveRaftState(state []byte) error {
 	s.writeRaftState(writer, state)
 	err = writer.flushAndRename(s.raftStatePath)
 	if err != nil {
-		err = &StorageError{Op: "save", Target: "raft state", Err: err}
+		err = &ReadWriteError{Op: "save", Target: "raft state", Err: err}
 		return err
 	}
 	s.raftState = clone(state)
@@ -291,7 +291,7 @@ func (s *Storage) SaveRaftState(state []byte) error {
 func (s *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
 	tmpFile, err := os.CreateTemp("", "raft*.rfs")
 	if err != nil {
-		err = &StorageError{Op: "save", Target: "raft state and snapshot", Err: err}
+		err = &ReadWriteError{Op: "save", Target: "raft state and snapshot", Err: err}
 		return err
 	}
 	writer := newErrWriter(tmpFile)
@@ -300,7 +300,7 @@ func (s *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
 	s.writeSnapshot(writer, snapshot)
 	err = writer.flushAndRename(s.snapshotPath)
 	if err != nil {
-		err = &StorageError{Op: "save", Target: "raft state and snapshot", Err: err}
+		err = &ReadWriteError{Op: "save", Target: "raft state and snapshot", Err: err}
 		return err
 	}
 	s.raftState = clone(state)
