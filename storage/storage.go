@@ -12,11 +12,11 @@ import (
 )
 
 //
-// Storage is used to read and persist raft state and snapshot of service.
+// RaftStorage is used to read and persist raft state and snapshot of service.
 // Create a storage by passing the service name to the MakeStorage method, the service name will be part of the persistence file name.
-// If you want to create Storage for multiple services, please specify a unique name for each service.
-// To ensure that the stored raft state and snapshot are consistent, Storage uses os.Rename to rename files atomically
-// Storage store the raft state in a file ending in .rf,
+// If you want to create RaftStorage for multiple services, please specify a unique name for each service.
+// To ensure that the stored raft state and snapshot are consistent, RaftStorage uses os.Rename to rename files atomically
+// RaftStorage store the raft state in a file ending in .rf,
 // the snapshot and its corresponding raft state is stored in the file at the end of .rfs.
 // After calling the GetRaftState or GetSnapshot method, if the data exists, it will be cached;
 // The cache will be refreshed when SaveRaftState or SaveSnapshot is called.
@@ -72,8 +72,8 @@ func (ew *errWriter) writeString(s string) {
 
 const fileHeader = "RAFT"
 
-// Storage is not thread safe
-type Storage struct {
+// RaftStorage is not thread safe
+type RaftStorage struct {
 	raftState            []byte
 	snapshot             []byte
 	nextRaftStateVersion int64
@@ -81,8 +81,8 @@ type Storage struct {
 	snapshotPath         string
 }
 
-func MakeStorage(serviceName string) (*Storage, error) {
-	s := &Storage{}
+func MakeStorage(serviceName string) (*RaftStorage, error) {
+	s := &RaftStorage{}
 	raftStatePath := serviceName + ".rf"
 	snapshotPath := serviceName + ".rfs"
 	if runtime.GOOS == "windows" {
@@ -99,7 +99,7 @@ func MakeStorage(serviceName string) (*Storage, error) {
 	return s, nil
 }
 
-func (s *Storage) initRead() error {
+func (s *RaftStorage) initRead() error {
 	var raftState1 []byte
 	var raftState2 []byte
 	var snapshot []byte
@@ -136,7 +136,7 @@ func openIfExists(name string) (fs.File, error) {
 	return file, nil
 }
 
-func (s *Storage) readRaftStateFile() ([]byte, int64, error) {
+func (s *RaftStorage) readRaftStateFile() ([]byte, int64, error) {
 	var raftState []byte
 	var version int64 = 0
 	file, err := openIfExists(s.raftStatePath)
@@ -159,7 +159,7 @@ func (s *Storage) readRaftStateFile() ([]byte, int64, error) {
 	return raftState, version, nil
 }
 
-func (s *Storage) readSnapshotFile() ([]byte, int64, []byte, error) {
+func (s *RaftStorage) readSnapshotFile() ([]byte, int64, []byte, error) {
 	var raftState []byte
 	var version int64 = 0
 	var snapshot []byte
@@ -187,7 +187,7 @@ func (s *Storage) readSnapshotFile() ([]byte, int64, []byte, error) {
 	return raftState, version, snapshot, nil
 }
 
-func (s *Storage) readRaftState(reader *bufio.Reader) ([]byte, int64, error) {
+func (s *RaftStorage) readRaftState(reader *bufio.Reader) ([]byte, int64, error) {
 	readString, err := reader.ReadString('\t')
 	if err != nil || len(readString) < 2 {
 		return nil, -1, ErrFormat
@@ -219,7 +219,7 @@ func (s *Storage) readRaftState(reader *bufio.Reader) ([]byte, int64, error) {
 	return readBytes, version, nil
 }
 
-func (s *Storage) readSnapshot(reader *bufio.Reader) ([]byte, error) {
+func (s *RaftStorage) readSnapshot(reader *bufio.Reader) ([]byte, error) {
 	readString, err := reader.ReadString('\t')
 	if err != nil || len(readString) < 2 {
 		return nil, ErrFormat
@@ -268,7 +268,7 @@ func (ew *errWriter) flushAndRename(path string) error {
 	return err
 }
 
-func (s *Storage) SaveRaftState(state []byte) error {
+func (s *RaftStorage) SaveRaftState(state []byte) error {
 	tmpFile, err := os.CreateTemp("", "raft*.rf")
 	if err != nil {
 		err = &ReadWriteError{Op: "save", Target: "raft state", Err: err}
@@ -288,7 +288,7 @@ func (s *Storage) SaveRaftState(state []byte) error {
 
 // SaveStateAndSnapshot save both Raft state and K/V snapshot as a single atomic action
 // to keep them consistent.
-func (s *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
+func (s *RaftStorage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
 	tmpFile, err := os.CreateTemp("", "raft*.rfs")
 	if err != nil {
 		err = &ReadWriteError{Op: "save", Target: "raft state and snapshot", Err: err}
@@ -308,7 +308,7 @@ func (s *Storage) SaveStateAndSnapshot(state []byte, snapshot []byte) error {
 	return nil
 }
 
-func (s *Storage) writeRaftState(writer *errWriter, state []byte) {
+func (s *RaftStorage) writeRaftState(writer *errWriter, state []byte) {
 	writer.writeString(strconv.FormatInt(s.nextRaftStateVersion, 10) + "\t")
 	raftStateSize := len(state)
 	writer.writeString(strconv.Itoa(raftStateSize) + "\t")
@@ -318,7 +318,7 @@ func (s *Storage) writeRaftState(writer *errWriter, state []byte) {
 	s.nextRaftStateVersion++
 }
 
-func (s *Storage) writeSnapshot(writer *errWriter, snapshot []byte) {
+func (s *RaftStorage) writeSnapshot(writer *errWriter, snapshot []byte) {
 	snapshotSize := len(snapshot)
 	writer.writeString(strconv.Itoa(snapshotSize) + "\t")
 	if snapshotSize > 0 {
@@ -332,15 +332,15 @@ func clone(data []byte) []byte {
 	return d
 }
 
-func (s *Storage) GetRaftState() []byte {
+func (s *RaftStorage) GetRaftState() []byte {
 	return s.raftState
 }
 
-func (s *Storage) GetSnapshot() []byte {
+func (s *RaftStorage) GetSnapshot() []byte {
 	return s.snapshot
 }
 
-func (s *Storage) RaftStateSize() int {
+func (s *RaftStorage) RaftStateSize() int {
 	return len(s.raftState)
 }
 
