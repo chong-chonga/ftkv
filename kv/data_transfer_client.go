@@ -1,22 +1,22 @@
-package shardkv
+package kv
 
 import (
 	"context"
 	"errors"
-	"github.com/ftkv/v1/shardkv/shardproto"
+	"github.com/ftkv/v1/kv/kvproto"
 	"github.com/ftkv/v1/tool"
 	"time"
 )
 
 type DataTransferClient struct {
-	rpcClients      []shardproto.ShardKVClient
+	rpcClients      []kvproto.KVClient
 	serverAddresses []string
 	lastLeader      int
 	timeout         time.Duration
 }
 
 func MakeDataTransferClient(serverAddresses []string) *DataTransferClient {
-	rpcClients := dialShardKVClients(serverAddresses)
+	rpcClients := dialKVClients(serverAddresses)
 	client := &DataTransferClient{
 		rpcClients:      rpcClients,
 		serverAddresses: serverAddresses,
@@ -26,14 +26,14 @@ func MakeDataTransferClient(serverAddresses []string) *DataTransferClient {
 	return client
 }
 
-func (c *DataTransferClient) callTransfer(rpcClient shardproto.ShardKVClient, req *shardproto.TransferRequest) (*shardproto.TransferReply, error) {
+func (c *DataTransferClient) callTransfer(rpcClient kvproto.KVClient, req *kvproto.TransferRequest) (*kvproto.TransferReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 	return rpcClient.Transfer(ctx, req)
 }
 
 func (c *DataTransferClient) Transfer(configId int32, shards []int32, data map[string]string) error {
-	req := &shardproto.TransferRequest{
+	req := &kvproto.TransferRequest{
 		ConfigId: configId,
 		Shards:   shards,
 		Data:     data,
@@ -42,15 +42,15 @@ func (c *DataTransferClient) Transfer(configId int32, shards []int32, data map[s
 	serverCount := len(rpcClients)
 	s := tool.ChooseServer(c.lastLeader, serverCount)
 	rpcClient := rpcClients[s]
-	var reply *shardproto.TransferReply
+	var reply *kvproto.TransferReply
 	var err error
 	for i := 0; i < serverCount; i++ {
 		reply, err = c.callTransfer(rpcClient, req)
 		if err == nil {
-			if reply.ErrCode == shardproto.ResponseCode_OK {
+			if reply.ErrCode == kvproto.ResponseCode_OK {
 				return nil
 			}
-			if reply.ErrCode == shardproto.ResponseCode_CONFIG_MISMATCH {
+			if reply.ErrCode == kvproto.ResponseCode_CONFIG_MISMATCH {
 				return errors.New("config mismatch")
 			}
 		}

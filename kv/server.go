@@ -1,4 +1,4 @@
-package shardkv
+package kv
 
 import (
 	"bytes"
@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ftkv/v1"
+	"github.com/ftkv/v1/kv/kvproto"
 	"github.com/ftkv/v1/raft"
 	"github.com/ftkv/v1/router"
-	"github.com/ftkv/v1/shardkv/shardproto"
 	"github.com/ftkv/v1/storage"
 	"github.com/ftkv/v1/tool"
 	"google.golang.org/grpc"
@@ -27,7 +28,7 @@ const (
 )
 
 type server struct {
-	shardproto.ShardKVServer
+	kvproto.KVServer
 
 	channelMu    *sync.Mutex
 	transferCond *sync.Cond
@@ -41,10 +42,10 @@ type server struct {
 	maxRaftStateSize int
 	rf               *Raft
 	applyCh          chan applyMsg
-	storage          *storage.Storage
+	storage          *storage.RaftStorage
 	waitingClients   map[int]chan int
 
-	shardkvId       string
+	kvId            string
 	groupId         int32
 	routerAddresses []string
 
@@ -64,11 +65,11 @@ type server struct {
 }
 
 type ServerConfigWrapper struct {
-	ServerConfig ServerConfig `yaml:"shardkvServer"`
+	ServerConfig ServerConfig `yaml:"kvServer"`
 }
 
 type ServerConfig struct {
-	ShardKVId        string      `yaml:"shardkvId"`
+	KVId             string      `yaml:"kvId"`
 	GroupId          int32       `yaml:"groupId"`
 	RouterAddresses  []string    `yaml:"routerAddresses"`
 	Port             int         `yaml:"port"`
@@ -90,44 +91,42 @@ func readServerConfig(config []byte) (*ServerConfig, error) {
 	if serverConfig.Port == 0 {
 		return nil, errors.New("port is not configured")
 	}
-	if len(serverConfig.ShardKVId) == 0 {
-		return nil, errors.New("shardkvId is not configured")
+	if len(serverConfig.KVId) == 0 {
+		return nil, errors.New("kvId is not configured")
 	}
 	return serverConfig, nil
 }
 
-type StopFunc func()
-
 //
-// StartShardKVServer starts a shardkv server which is responsible for a subset of the shards.
+// StartServer starts a shardkv server which is responsible for a subset of the shards.
 // A replica consists of a handful of servers that use Raft to replicate the group's shards
 //
-func StartShardKVServer(configData []byte) (string, StopFunc, error) {
+func StartServer(configData []byte) (*ftkv.RaftService, error) {
 	config, err := readServerConfig(configData)
 	if err != nil {
-		return "", nil, &tool.RuntimeError{Stage: "load config", Err: err}
+		return nil, &tool.RuntimeError{Stage: "load config", Err: err}
 	}
 
 	port := config.Port
 	if port <= 0 {
-		return "", nil, &tool.RuntimeError{Stage: "configure shardkv server", Err: errors.New("server port " + strconv.Itoa(port) + " is invalid")}
+		return nil, &tool.RuntimeError{Stage: "configure kv server", Err: errors.New("server port " + strconv.Itoa(port) + " is invalid")}
 	}
-	routerClient, err := router.MakeListenerClient(config.RouterAddresses)
+	routerClient, err := router.MakeListenerClient(config.RouterAddresses, config.LogEnabled)
 	if err != nil {
-		return "", nil, &tool.RuntimeError{Stage: "configure shardkv server", Err: err}
+		return nil, &tool.RuntimeError{Stage: "configure kv server", Err: err}
 	}
 
 	//timeout := config.SessionTimeout
 	//if timeout <= 0 {
-	//	return "", nil, &tool.RuntimeError{Stage: "configure shardkv server", Err: errors.New("session timeout must be positive")}
+	//	return "", nil, &tool.RuntimeError{Stage: "configure kv server", Err: errors.New("session timeout must be positive")}
 	//}
 
-	shardKVId := config.ShardKVId
+	shardKVId := config.KVId
 	groupId := config.GroupId
-	serviceName := "shardkv-" + strconv.Itoa(int(groupId)) + "-" + shardKVId
-	storage, err := storage.MakeStorage(serviceName)
+	serviceName := "kv-" + strconv.Itoa(int(groupId)) + "-" + shardKVId
+	raftStorage, err := storage.MakeStorage(serviceName)
 	if err != nil {
-		return "", nil, &tool.RuntimeError{Stage: "make storage", Err: err}
+		return nil, &tool.RuntimeError{Stage: "make raftStorage", Err: err}
 	}
 
 	shardkv := new(server)
@@ -135,24 +134,21 @@ func StartShardKVServer(configData []byte) (string, StopFunc, error) {
 	shardkv.shardMu = &sync.Mutex{}
 	shardkv.transferCond = sync.NewCond(shardkv.shardMu)
 
-	snapshot := storage.GetSnapshot()
+	snapshot := raftStorage.GetSnapshot()
 	if nil != snapshot && len(snapshot) > 0 {
 		if err = shardkv.restore(snapshot); err != nil {
-			return "", nil, &tool.RuntimeError{Stage: "restore", Err: err}
+			return nil, &tool.RuntimeError{Stage: "restore", Err: err}
 		}
 	} else {
 		shardkv.initPersistentState()
 	}
 
-	shardkv.shardkvId = shardKVId
+	shardkv.kvId = shardKVId
 	shardkv.groupId = groupId
 	shardkv.routerAddresses = config.RouterAddresses
-	//shardkv.password = config.Password
-	//shardkv.sessionTimeout = time.Duration(timeout) * time.Second
-	//shardkv.sessionMap = make(map[string]time.Time)
 	//log.Printf("configure shardkv info: session expireTime=%ds")
 
-	shardkv.storage = storage
+	shardkv.storage = raftStorage
 	shardkv.waitingClients = make(map[int]chan int)
 
 	// configure router
@@ -175,17 +171,17 @@ func StartShardKVServer(configData []byte) (string, StopFunc, error) {
 	listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
 	if err != nil {
 		err = &tool.RuntimeError{Stage: "start listener", Err: err}
-		return "", nil, err
+		return nil, err
 	}
 
 	applyCh := make(chan applyMsg)
 	shardkv.applyCh = applyCh
 	// initialize success, start Raft
 	raftConfig := config.Raft
-	shardkv.rf, err = startRaft(raftConfig, storage, applyCh)
+	shardkv.rf, err = startRaft(raftConfig, raftStorage, applyCh)
 	if err != nil {
 		_ = listener.Close()
-		return "", nil, err
+		return nil, err
 	}
 
 	go shardkv.listenConfig(routerClient)
@@ -194,13 +190,16 @@ func StartShardKVServer(configData []byte) (string, StopFunc, error) {
 
 	// start grpc server
 	s := grpc.NewServer()
-	shardproto.RegisterShardKVServer(s, shardkv)
+	kvproto.RegisterKVServer(s, shardkv)
 	go func() {
 		_ = s.Serve(listener)
 	}()
 
 	log.Printf("start shardkv server success, serviceName=%s, serves at port:%d", serviceName, port)
-	return serviceName, s.Stop, nil
+	return &ftkv.RaftService{
+		Name:   serviceName,
+		Server: s,
+	}, nil
 }
 
 func (s *server) initPersistentState() {
@@ -219,14 +218,14 @@ func (s *server) initPersistentState() {
 
 func (s *server) logPrintf(method string, format string, a ...interface{}) {
 	if s.logEnabled {
-		prefix := "[" + strconv.FormatInt(int64(s.groupId), 10) + "-" + s.shardkvId + "] " + method + ": "
+		prefix := "[" + strconv.FormatInt(int64(s.groupId), 10) + "-" + s.kvId + "] " + method + ": "
 		str := fmt.Sprintf(prefix+format, a...)
 		log.Println(str)
 	}
 }
 
 func (s *server) logFatalf(method string, format string, a ...interface{}) {
-	prefix := "[" + strconv.FormatInt(int64(s.groupId), 10) + "-" + s.shardkvId + "] " + method + ": "
+	prefix := "[" + strconv.FormatInt(int64(s.groupId), 10) + "-" + s.kvId + "] " + method + ": "
 	str := fmt.Sprintf(prefix+format, a...)
 	log.Fatalln(str)
 }
@@ -362,19 +361,18 @@ func (s *server) isLeader() bool {
 	return isLeader
 }
 
-func (s *server) Get(_ context.Context, args *shardproto.GetRequest) (*shardproto.GetReply, error) {
+func (s *server) Get(_ context.Context, args *kvproto.GetRequest) (*kvproto.GetReply, error) {
 	key := args.Key
 	c := command{
 		CommandType: commandType_Get,
 	}
-	reply := &shardproto.GetReply{}
+	reply := &kvproto.GetReply{}
 
 	errcode := s.submit(c)
 	value := ""
 	exist := false
 
-	fmt.Printf("errcode=%v, target=%v, %v", errcode, shardproto.ResponseCode_OK, errcode == shardproto.ResponseCode_OK)
-	if errcode == shardproto.ResponseCode_OK {
+	if errcode == kvproto.ResponseCode_OK {
 		shard := router.Key2Shard(key)
 		shardMu := s.shardMu
 		// check if shard exists first, then fetch the data
@@ -387,10 +385,10 @@ func (s *server) Get(_ context.Context, args *shardproto.GetRequest) (*shardprot
 		if _, exist = s.shards[shard]; exist {
 			value, exist = s.ht[key]
 			if !exist {
-				errcode = shardproto.ResponseCode_KEY_NOT_EXISTS
+				errcode = kvproto.ResponseCode_KEY_NOT_EXISTS
 			}
 		} else {
-			errcode = shardproto.ResponseCode_WRONG_GROUP
+			errcode = kvproto.ResponseCode_WRONG_GROUP
 		}
 		shardMu.Unlock()
 	}
@@ -403,7 +401,7 @@ func (s *server) Get(_ context.Context, args *shardproto.GetRequest) (*shardprot
 	return reply, nil
 }
 
-func (s *server) Set(_ context.Context, args *shardproto.SetRequest) (*shardproto.SetReply, error) {
+func (s *server) Set(_ context.Context, args *kvproto.SetRequest) (*kvproto.SetReply, error) {
 	key := args.Key
 	value := args.Value
 	c := command{
@@ -411,7 +409,7 @@ func (s *server) Set(_ context.Context, args *shardproto.SetRequest) (*shardprot
 		Key:         key,
 		Value:       value,
 	}
-	reply := &shardproto.SetReply{}
+	reply := &kvproto.SetReply{}
 	errcode := s.submit(c)
 	errmsg := errcode.String()
 	reply.ErrCode = errcode
@@ -420,13 +418,13 @@ func (s *server) Set(_ context.Context, args *shardproto.SetRequest) (*shardprot
 	return reply, nil
 }
 
-func (s *server) Delete(_ context.Context, args *shardproto.DeleteRequest) (*shardproto.DeleteReply, error) {
+func (s *server) Delete(_ context.Context, args *kvproto.DeleteRequest) (*kvproto.DeleteReply, error) {
 	key := args.Key
 	c := command{
 		CommandType: commandType_Delete,
 		Key:         key,
 	}
-	reply := &shardproto.DeleteReply{}
+	reply := &kvproto.DeleteReply{}
 	errcode := s.submit(c)
 	errmsg := errcode.String()
 	reply.ErrCode = errcode
@@ -435,14 +433,14 @@ func (s *server) Delete(_ context.Context, args *shardproto.DeleteRequest) (*sha
 	return reply, nil
 }
 
-func (s *server) Transfer(_ context.Context, args *shardproto.TransferRequest) (*shardproto.TransferReply, error) {
+func (s *server) Transfer(_ context.Context, args *kvproto.TransferRequest) (*kvproto.TransferReply, error) {
 	c := command{
 		CommandType: commandType_Transfer_Shards,
 		ConfigId:    args.ConfigId,
 		Shards:      args.Shards,
 		Data:        args.Data,
 	}
-	reply := &shardproto.TransferReply{}
+	reply := &kvproto.TransferReply{}
 	reply.ErrCode = s.submit(c)
 	reply.ErrMessage = reply.ErrCode.String()
 	return reply, nil
@@ -484,14 +482,14 @@ func (s *server) deleteShards(configId int32, groupId int32, keys []string) bool
 		Keys:        keys,
 	}
 	errCode := s.submit(c)
-	return errCode == shardproto.ResponseCode_OK
+	return errCode == kvproto.ResponseCode_OK
 }
 
-func (s *server) submit(command command) shardproto.ResponseCode {
+func (s *server) submit(command command) kvproto.ResponseCode {
 	commandIndex, commandTerm, isLeader := s.rf.Start(command)
 	if !isLeader {
 		s.logPrintf("submit", "not leader, refuse command:%s", command.CommandString())
-		return shardproto.ResponseCode_WRONG_LEADER
+		return kvproto.ResponseCode_WRONG_LEADER
 	}
 	// leader1(current leader) may be partitioned by itself,
 	// its log may be trimmed by leader2 (if and only if leader2's term > leader1's term)
@@ -516,15 +514,15 @@ func (s *server) submit(command command) shardproto.ResponseCode {
 	s.logPrintf("submit", "expected commandTerm=%d for commandIndex=%d, received commandTerm=%d", commandTerm, commandIndex, receivedTerm)
 	// log's index and term identifies the unique log
 	if receivedTerm == commandTerm {
-		return shardproto.ResponseCode_OK
+		return kvproto.ResponseCode_OK
 	}
 	switch receivedTerm {
 	case wrongGroupTerm:
-		return shardproto.ResponseCode_WRONG_GROUP
+		return kvproto.ResponseCode_WRONG_GROUP
 	case configMismatchTerm:
-		return shardproto.ResponseCode_CONFIG_MISMATCH
+		return kvproto.ResponseCode_CONFIG_MISMATCH
 	default:
-		return shardproto.ResponseCode_WRONG_LEADER
+		return kvproto.ResponseCode_WRONG_LEADER
 	}
 }
 
@@ -740,7 +738,7 @@ func (s *server) executeCommands() {
 					s.handleShardsDelete(c.ConfigId, c.GroupId, c.Keys)
 					break
 				default:
-					s.logFatalf("receives unknown type command:%s", s.shardkvId, c.CommandString())
+					s.logFatalf("receives unknown type command:%s", s.kvId, c.CommandString())
 				}
 			}
 			s.replyClientIfNeeded(commandIndex, commandTerm)
@@ -810,7 +808,7 @@ func (s *server) handleClientUpdateRequest(ct commandType, key string, value str
 func (s *server) handleConfig(configId int32, shardsToGet map[int]byte, shardsToTransfer map[int32][]int, replicaGroups map[int32][]string) {
 	nextConfigId := s.currentConfigId + 1
 	if configId > nextConfigId {
-		s.logFatalf("[%s] expected nextConfigId=%d, but received configId=%d "+s.shardInfo(), s.shardkvId, nextConfigId, configId)
+		s.logFatalf("[%s] expected nextConfigId=%d, but received configId=%d "+s.shardInfo(), s.kvId, nextConfigId, configId)
 	} else if configId == nextConfigId {
 		if !s.reshard {
 			shardMu := s.shardMu

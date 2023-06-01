@@ -4,7 +4,7 @@
 // - protoc             v3.21.9
 // source: router.proto
 
-package protobuf
+package routerproto
 
 import (
 	context "context"

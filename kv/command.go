@@ -1,4 +1,4 @@
-package shardkv
+package kv
 
 import (
 	"bytes"
