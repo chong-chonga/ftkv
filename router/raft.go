@@ -62,7 +62,7 @@ type Raft struct {
 	// initialize when starting
 	mu        sync.Mutex // Lock to protect shared access to this peer's state
 	applyCond *sync.Cond
-	storage   *storage.Storage // tool for persistence
+	storage   *storage.RaftStorage // tool for persistence
 
 	applyCh       chan applyMsg // for Raft to send committed log and snapshot
 	sendOrderCond *sync.Cond    // condition for sendOrder
@@ -106,7 +106,7 @@ func currentMilli() int64 {
 // raftAddresses are other Raft's ip address
 // port specifies the Raft server port
 // me in the cluster shouldn't be duplicate but the order of raftAddresses can be random
-func startRaft(conf raft.Config, storage *storage.Storage, applyCh chan applyMsg) (*Raft, error) {
+func startRaft(conf raft.Config, storage *storage.RaftStorage, applyCh chan applyMsg) (*Raft, error) {
 
 	rf := &Raft{}
 	port := conf.Port
@@ -541,45 +541,47 @@ func (rf *Raft) sendVoteRequestsAndHandleReply(args *RequestVoteArgs, peers []*t
 		go func(server *tool.Peer) {
 			reply := &RequestVoteReply{}
 			rf.logRequestVote("[%d] request vote from %s in term %d", rf.me, server.GetAddr(), args.Term)
-			ok := server.Call("Raft.RequestVote", args, reply)
-			if ok {
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				// rules for all servers in Figure 2
-				if reply.Term > rf.currentTerm {
-					rf.toFollower(reply.Term)
-					err := rf.persist()
-					if err != nil {
-						panic(err.Error())
+			err := server.Call("Raft.RequestVote", args, reply)
+			if err != nil {
+				rf.logRequestVote("send request vote fail, err=%v", err)
+				return
+			}
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			// rules for all servers in Figure 2
+			if reply.Term > rf.currentTerm {
+				rf.toFollower(reply.Term)
+				err := rf.persist()
+				if err != nil {
+					panic(err.Error())
+				}
+				rf.resetTimeout()
+				rf.logRequestVote("[%d] change to follower, because %s term is bigger than currentTerm", rf.me, server.GetAddr())
+				return
+			}
+			// term 或 role 发生改变时，当前 election 作废
+			if rf.state != candidate || rf.currentTerm != args.Term {
+				rf.logRequestVote("[%d] abandon the current election in term %d", rf.me, args.Term)
+				return
+			}
+			if reply.VoteGranted {
+				votes++
+				rf.logRequestVote("[%d] got vote from %s in term %d", rf.me, server.GetAddr(), args.Term)
+				if votes >= majorityVotes {
+					rf.logRequestVote("[%d] got majority votes, is leader in term %d", rf.me, args.Term)
+					followers := len(rf.peers)
+					rf.state = leader
+					rf.nextIndex = make([]int, followers)
+					rf.matchIndex = make([]int, followers)
+					rf.heartbeatSent = make([]int64, followers)
+					totalLogCount := rf.lastIncludedIndex + len(rf.log) + 1
+					for i := 0; i < followers; i++ {
+						rf.nextIndex[i] = totalLogCount
+						rf.matchIndex[i] = 0
 					}
-					rf.resetTimeout()
-					rf.logRequestVote("[%d] change to follower, because %s term is bigger than currentTerm", rf.me, server.GetAddr())
-					return
-				}
-				// term 或 role 发生改变时，当前 election 作废
-				if rf.state != candidate || rf.currentTerm != args.Term {
-					rf.logRequestVote("[%d] abandon the current election in term %d", rf.me, args.Term)
-					return
-				}
-				if reply.VoteGranted {
-					votes++
-					rf.logRequestVote("[%d] got vote from %s in term %d", rf.me, server.GetAddr(), args.Term)
-					if votes >= majorityVotes {
-						rf.logRequestVote("[%d] got majority votes, is leader in term %d", rf.me, args.Term)
-						followers := len(rf.peers)
-						rf.state = leader
-						rf.nextIndex = make([]int, followers)
-						rf.matchIndex = make([]int, followers)
-						rf.heartbeatSent = make([]int64, followers)
-						totalLogCount := rf.lastIncludedIndex + len(rf.log) + 1
-						for i := 0; i < followers; i++ {
-							rf.nextIndex[i] = totalLogCount
-							rf.matchIndex[i] = 0
-						}
-						for i := 0; i < followers; i++ {
-							rf.heartbeatSent[i] = 0
-							go rf.heartbeat(i, rf.currentTerm)
-						}
+					for i := 0; i < followers; i++ {
+						rf.heartbeatSent[i] = 0
+						go rf.heartbeat(i, rf.currentTerm)
 					}
 				}
 			}
@@ -592,31 +594,33 @@ func (rf *Raft) sendSnapshotAndHandleReply(server int, term int, args *InstallSn
 	peer := rf.peers[server]
 	rf.logInstallSnapshot("[%d] send snapshot to %s, lastIncludedIndex=%d", args.LeaderId, peer.GetAddr(), args.LastIncludedIndex)
 	reply := &InstallSnapshotReply{}
-	ok := peer.Call("Raft.InstallSnapshot", args, reply)
-	if ok {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if reply.Term > rf.currentTerm {
-			rf.toFollower(reply.Term)
-			err := rf.persist()
-			if err != nil {
-				panic(err.Error())
-			}
-			rf.resetTimeout()
-			return
-		}
-		if rf.state != leader || rf.currentTerm != term {
-			return
-		}
-		// if an outdated reply is received, ignore it
-		if rf.nextIndex[server] > args.LastIncludedIndex || rf.matchIndex[server] >= args.LastIncludedIndex {
-			return
-		}
-		// logs in snapshot are committed, no need to update commitIndex
-		rf.nextIndex[server] = args.LastIncludedIndex + 1
-		rf.matchIndex[server] = args.LastIncludedIndex
-		rf.logInstallSnapshot("[%d] receive InstallSnapshot success reply from %s, lastIncludedIndex=%d", args.LeaderId, peer.GetAddr(), args.LastIncludedIndex)
+	err := peer.Call("Raft.InstallSnapshot", args, reply)
+	if err != nil {
+		rf.logInstallSnapshot("send snapshot fail, err=%v", err)
+		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if reply.Term > rf.currentTerm {
+		rf.toFollower(reply.Term)
+		err := rf.persist()
+		if err != nil {
+			panic(err.Error())
+		}
+		rf.resetTimeout()
+		return
+	}
+	if rf.state != leader || rf.currentTerm != term {
+		return
+	}
+	// if an outdated reply is received, ignore it
+	if rf.nextIndex[server] > args.LastIncludedIndex || rf.matchIndex[server] >= args.LastIncludedIndex {
+		return
+	}
+	// logs in snapshot are committed, no need to update commitIndex
+	rf.nextIndex[server] = args.LastIncludedIndex + 1
+	rf.matchIndex[server] = args.LastIncludedIndex
+	rf.logInstallSnapshot("[%d] receive InstallSnapshot success reply from %s, lastIncludedIndex=%d", args.LeaderId, peer.GetAddr(), args.LastIncludedIndex)
 }
 
 // If successful: update nextIndex and matchIndex for follower (§5.3)
@@ -627,41 +631,43 @@ func (rf *Raft) sendEntriesAndHandleReply(server int, lastIndex int, term int, a
 	peer := rf.peers[server]
 	rf.logAppendEntry("[%d] send append rpc to %d in term %d", args.LeaderId, server, args.Term)
 	reply := &AppendEntriesReply{}
-	ok := peer.Call("Raft.AppendEntries", args, reply)
-	if ok {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if reply.Term > rf.currentTerm {
-			rf.toFollower(reply.Term)
-			err := rf.persist()
-			if err != nil {
-				panic(err.Error())
-			}
-			rf.resetTimeout()
+	err := peer.Call("Raft.AppendEntries", args, reply)
+	if err != nil {
+		rf.logAppendEntry("send entries fail, err=%v", err)
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if reply.Term > rf.currentTerm {
+		rf.toFollower(reply.Term)
+		err := rf.persist()
+		if err != nil {
+			panic(err.Error())
+		}
+		rf.resetTimeout()
+		return
+	}
+	if rf.state != leader || rf.currentTerm != term {
+		return
+	}
+	if reply.Success {
+		rf.logAppendEntry("[%d] receive success append reply from %s, last append index is %d", rf.me, peer.GetAddr(), lastIndex)
+		if rf.nextIndex[server] > lastIndex {
 			return
 		}
-		if rf.state != leader || rf.currentTerm != term {
-			return
+		rf.nextIndex[server] = lastIndex + 1
+		rf.matchIndex[server] = lastIndex
+		index := majorityCommitIndex(rf)
+		if rf.commitIndex < index {
+			rf.commitIndex = index
+			rf.logAppendEntry("[%d] has replicated log on majority servers, update commitIndex to %d", rf.me, index)
+			rf.applyCond.Signal()
 		}
-		if reply.Success {
-			rf.logAppendEntry("[%d] receive success append reply from %s, last append index is %d", rf.me, peer.GetAddr(), lastIndex)
-			if rf.nextIndex[server] > lastIndex {
-				return
-			}
-			rf.nextIndex[server] = lastIndex + 1
-			rf.matchIndex[server] = lastIndex
-			index := majorityCommitIndex(rf)
-			if rf.commitIndex < index {
-				rf.commitIndex = index
-				rf.logAppendEntry("[%d] has replicated log on majority servers, update commitIndex to %d", rf.me, index)
-				rf.applyCond.Signal()
-			}
-		} else {
-			rollbackIndex := backupIndex(reply, rf.log, args.PrevLogIndex, rf.lastIncludedIndex)
-			if rollbackIndex <= rf.nextIndex[server] {
-				rf.nextIndex[server] = rollbackIndex
-				rf.logAppendEntry("[%d] append to %s failed, nextIndex back up to %d", rf.me, peer.GetAddr(), rollbackIndex)
-			}
+	} else {
+		rollbackIndex := backupIndex(reply, rf.log, args.PrevLogIndex, rf.lastIncludedIndex)
+		if rollbackIndex <= rf.nextIndex[server] {
+			rf.nextIndex[server] = rollbackIndex
+			rf.logAppendEntry("[%d] append to %s failed, nextIndex back up to %d", rf.me, peer.GetAddr(), rollbackIndex)
 		}
 	}
 }

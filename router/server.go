@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ftkv/v1"
 	"github.com/ftkv/v1/raft"
 	"github.com/ftkv/v1/router/routerproto"
 	"github.com/ftkv/v1/storage"
@@ -27,7 +28,7 @@ type server struct {
 	maxRaftStateSize int
 	rf               *Raft
 	applyCh          chan applyMsg
-	storage          *storage.Storage
+	storage          *storage.RaftStorage
 	waitingClients   map[int]chan commitResult
 
 	routerId string
@@ -69,40 +70,38 @@ func readServerConfig(config []byte) (*ServerConfig, error) {
 	return serverConfig, nil
 }
 
-type StopFunc func()
-
 //
-// StartRouterServer starts a router server which manages cluster configuration and data-sharding of the system.
+// StartServer starts a router server which manages cluster configuration and data-sharding of the system.
 //
-func StartRouterServer(configData []byte) (string, StopFunc, error) {
+func StartServer(configData []byte) (*ftkv.RaftService, error) {
 	config, err := readServerConfig(configData)
 	if err != nil {
-		return "", nil, &tool.RuntimeError{Stage: "load config", Err: err}
+		return nil, &tool.RuntimeError{Stage: "load config", Err: err}
 	}
 
 	port := config.Port
 	if port <= 0 {
-		return "", nil, &tool.RuntimeError{Stage: "configure router server", Err: errors.New("server port " + strconv.Itoa(port) + " is invalid")}
+		return nil, &tool.RuntimeError{Stage: "configure router server", Err: errors.New("server port " + strconv.Itoa(port) + " is invalid")}
 	}
 	routerId := config.RouterId
 	serviceName := "router-" + routerId
-	storage, err := storage.MakeStorage(serviceName)
+	raftStorage, err := storage.MakeStorage(serviceName)
 	if err != nil {
-		return "", nil, &tool.RuntimeError{Stage: "make storage", Err: err}
+		return nil, &tool.RuntimeError{Stage: "make raftStorage", Err: err}
 	}
 
 	rt := new(server)
-	snapshot := storage.GetSnapshot()
+	snapshot := raftStorage.GetSnapshot()
 	if nil != snapshot && len(snapshot) > 0 {
 		if err = rt.restore(snapshot); err != nil {
-			return "", nil, &tool.RuntimeError{Stage: "restore", Err: err}
+			return nil, &tool.RuntimeError{Stage: "restore", Err: err}
 		}
 	} else {
 		rt.initPersistentState()
 	}
 	rt.routerId = routerId
 
-	rt.storage = storage
+	rt.storage = raftStorage
 	rt.waitingClients = make(map[int]chan commitResult)
 
 	// configure router
@@ -125,17 +124,17 @@ func StartRouterServer(configData []byte) (string, StopFunc, error) {
 	listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
 	if err != nil {
 		err = &tool.RuntimeError{Stage: "start listener", Err: err}
-		return "", nil, err
+		return nil, err
 	}
 
 	applyCh := make(chan applyMsg)
 	rt.applyCh = applyCh
 	// initialize success, start Raft
 	raftConfig := config.Raft
-	rt.rf, err = startRaft(raftConfig, storage, applyCh)
+	rt.rf, err = startRaft(raftConfig, raftStorage, applyCh)
 	if err != nil {
 		_ = listener.Close()
-		return "", nil, err
+		return nil, err
 	}
 
 	go rt.executeCommands()
@@ -148,7 +147,10 @@ func StartRouterServer(configData []byte) (string, StopFunc, error) {
 	}()
 
 	log.Printf("start router server success, serviceName=%s, serves at port:%d", serviceName, port)
-	return serviceName, s.Stop, nil
+	return &ftkv.RaftService{
+		Name:   serviceName,
+		Server: s,
+	}, nil
 }
 
 func (s *server) initPersistentState() {
