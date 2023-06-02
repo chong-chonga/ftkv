@@ -1,0 +1,18 @@
+routerServer:
+  routerId: 1
+  port: 9001
+  maxRaftStateSize: 8192
+  logEnabled: false
+  raft:
+    raftId: 1
+    # 指定Raft运行在哪个端口
+    port: 8081
+    # 指定集群中其他Raft运行的地址（包括端口）
+    serverAddresses: ['127.0.0.1:8082', '127.0.0.1:8083']
+    randomInterval: 150
+    minElectionTimeout: 350
+    log:
+      requestVoteEnabled: false
+      appendEntryEnabled: false
+      installSnapshotEnabled: false
+      persistEnabled: false

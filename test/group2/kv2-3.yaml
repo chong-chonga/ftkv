@@ -1,0 +1,20 @@
+kvServer:
+  kvId: 3
+  groupId: 2
+  routerAddresses: ["127.0.0.1:9001", "127.0.0.1:9002", "127.0.0.1:9003"]
+  port: 7006
+  maxRaftStateSize: 8192
+  logEnabled: false
+  raft:
+    raftId: 3
+    # 指定Raft运行在哪个端口
+    port: 9016
+    # 指定集群中其他Raft运行的地址（包括端口）
+    serverAddresses: ['127.0.0.1:9014', '127.0.0.1:9015']
+    randomInterval: 150
+    minElectionTimeout: 350
+    log:
+      requestVoteEnabled: false
+      appendEntryEnabled: false
+      installSnapshotEnabled: false
+      persistEnabled: false
