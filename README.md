@@ -40,13 +40,13 @@ go version
 1. 运行以下命令克隆本仓库代码
 
 ```shell
-git clone https://github.com/chong-chonga/FaultTolerantKVService.git
+git clone https://github.com/chong-chonga/ftkv.git
 ```
 
-2. 克隆成功后，会得到一个名为**FaultTolerantKVService**的文件夹，使用cd命令进入main文件夹
+2. 克隆成功后，会得到一个名为**ftkv**的文件夹，使用cd命令进入main文件夹
 
 ```shell
-cd FaultTolerantKVService/main/
+cd ftkv/main/
 ```
 
 3. 运行以下命令后，会在本地启动三个KVServer，彼此之间使用raft算法达成共识；可通过命令行交互来测试基础功能
