@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,5 +61,34 @@ func ReplaceFileNames(filePaths []string, target string, replacement string) err
 			}
 		}
 	}
+	return nil
+}
+
+// ReadFile 读取指定路径的文件内容，并以字符串形式返回
+func ReadFile(filePath string) (string, error) {
+	content, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+// RenameFile 根据给定的路径和目标名称，将指定文件重命名为该名称
+func RenameFile(filePath string, targetName string) error {
+	dirPath := filepath.Dir(filePath)
+	newPath := filepath.Join(dirPath, targetName)
+
+	// 检查目标文件是否已存在
+	_, err := os.Stat(newPath)
+	if err == nil {
+		return os.ErrExist
+	}
+
+	// 重命名文件
+	err = os.Rename(filePath, newPath)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
