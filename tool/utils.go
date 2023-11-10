@@ -2,6 +2,8 @@ package tool
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -78,4 +80,39 @@ func ChooseServer(lastLeader int, serverCount int) int {
 		x := rand.Intn(serverCount)
 		return x
 	}
+}
+
+// MaxInt 返回两个整数中的最大值
+func MaxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// MinInt 返回两个整数中的最小值
+func MinInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// IsPrime 判断一个整数是否是素数
+func IsPrime(n int) bool {
+	if n <= 1 {
+		return false
+	}
+	maxDivisor := int(math.Sqrt(float64(n)))
+	for i := 2; i <= maxDivisor; i++ {
+		if n%i == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Greet 打印欢迎消息
+func Greet(name string) {
+	fmt.Printf("Hello, %s!\n", name)
 }
