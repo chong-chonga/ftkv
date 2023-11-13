@@ -1,11 +1,9 @@
 package tool
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,19 +43,11 @@ func ReplaceFileNames(filePaths []string, target string, replacement string) err
 		if strings.Contains(fileName, target) {
 			fileName = strings.ReplaceAll(fileName, target, replacement)
 			newPath := filepath.Join(filepath.Dir(oldPath), fileName)
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Printf("%s -> %s Y/N ", oldPath, newPath)
-			input, err := reader.ReadString('\n')
+			err := os.Rename(oldPath, newPath)
 			if err != nil {
-				return err
-			}
-			if strings.Contains(input, "Y") || strings.Contains(input, "y") {
-				err := os.Rename(oldPath, newPath)
-				if err != nil {
-					fmt.Printf("Failed to rename file %s: %v\n", oldPath, err)
-				} else {
-					fmt.Printf("File %s renamed to %s\n", oldPath, newPath)
-				}
+				fmt.Printf("Failed to rename file %s: %v\n", oldPath, err)
+			} else {
+				fmt.Printf("File %s renamed to %s\n", oldPath, newPath)
 			}
 		}
 	}
@@ -66,7 +56,7 @@ func ReplaceFileNames(filePaths []string, target string, replacement string) err
 
 // ReadFile 读取指定路径的文件内容，并以字符串形式返回
 func ReadFile(filePath string) (string, error) {
-	content, err := ioutil.ReadFile(filePath)
+	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", err
 	}

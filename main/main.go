@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"github.com/ftkv/v1/tool"
 	"log"
+	"sort"
+	"strconv"
+	"strings"
 )
 
 // import (
@@ -29,14 +32,44 @@ import (
 // //go:embed kvclient.yaml
 // var data4 []byte
 func main() {
-	targetSuffix := ".7zz"
-	replacement := ".7z"
-	files, err := tool.FindFiles("C:\\baidudownload\\XZ-AZAMI-105", targetSuffix)
+	targetSuffix := ".7z"
+	files, err := tool.FindFiles("C:\\baidudownload\\1", targetSuffix)
 	if err != nil {
 		log.Fatalln(err.Error())
 	}
-	fmt.Println(files)
-	tool.ReplaceFileNames(files, targetSuffix, replacement)
+	var nums []int
+	for _, file := range files {
+		end := strings.LastIndex(file, ".")
+		start := strings.Index(file, ".")
+		numberName := file[start:end]
+		number, err := strconv.Atoi(numberName)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		nums = append(nums, number)
+	}
+	sort.Ints(nums)
+	start := 1
+	for _, num := range nums {
+		if start != num {
+			fmt.Printf("缺失 %d-%d 分卷\n", start, num-1)
+			start = num
+		}
+	}
+	//for _, file := range files {
+	//	err := os.Remove(file)
+	//	if err != nil {
+	//		fmt.Printf("remove %s fail, err: %s\n", file, err)
+	//	} else {
+	//		fmt.Printf("remove %s success\n", file)
+	//	}
+	//}
+	//fmt.Println(files)
+	//fmt.Printf("total %d files\n", len(files))
+	//err = tool.ReplaceFileNames(files, targetSuffix, replacement)
+	//if err != nil {
+	//	log.Fatalln(err)
+	//}
 	//	_, err := kvserver.StartKVServer(data1)
 	//	if err != nil {
 	//		log.Fatalln(err)
