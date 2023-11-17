@@ -4,9 +4,6 @@ import (
 	"fmt"
 	"github.com/ftkv/v1/tool"
 	"log"
-	"sort"
-	"strconv"
-	"strings"
 )
 
 // import (
@@ -32,30 +29,25 @@ import (
 // //go:embed kvclient.yaml
 // var data4 []byte
 func main() {
-	targetSuffix := ".7z"
-	files, err := tool.FindFiles("C:\\baidudownload\\1", targetSuffix)
+	targetSuffix := ".txt"
+	dir := "C:\\baidudownload"
+	files, err := tool.FindFiles(dir, targetSuffix)
 	if err != nil {
-		log.Fatalln(err.Error())
+		log.Fatalln(err)
 	}
-	var nums []int
+	fmt.Printf("find %d files\n", len(files))
+	var httpsLinks []string
 	for _, file := range files {
-		end := strings.LastIndex(file, ".")
-		start := strings.Index(file, ".")
-		numberName := file[start:end]
-		number, err := strconv.Atoi(numberName)
+		link, err := tool.FindBaiduNetDiskLinkIn(file)
 		if err != nil {
 			log.Fatalln(err)
 		}
-		nums = append(nums, number)
+		httpsLinks = append(httpsLinks, tool.ExtractHTTPSLinks(link)...)
 	}
-	sort.Ints(nums)
-	start := 1
-	for _, num := range nums {
-		if start != num {
-			fmt.Printf("缺失 %d-%d 分卷\n", start, num-1)
-			start = num
-		}
+	for _, link := range httpsLinks {
+		fmt.Println(link)
 	}
+
 	//for _, file := range files {
 	//	err := os.Remove(file)
 	//	if err != nil {

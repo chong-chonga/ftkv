@@ -1,11 +1,13 @@
 package tool
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -81,4 +83,56 @@ func RenameFile(filePath string, targetName string) error {
 	}
 
 	return nil
+}
+
+func FindBaiduNetDiskLinkIn(filepath string) ([]string, error) {
+	linkPrefix := "https://pan.baidu.com/s"
+	// 判断文件是否是txt类型
+	if !strings.HasSuffix(filepath, ".txt") {
+		return nil, fmt.Errorf("文件%s不是txt类型", filepath)
+	}
+
+	// 打开文件
+	file, err := os.Open(filepath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// 逐行扫描文件内容
+	result := []string{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// 如果该行包含https:内容，记录该行及下一行
+		if strings.Contains(line, linkPrefix) {
+			result = append(result, line)
+
+			// 读取下一行
+			if scanner.Scan() {
+				result = append(result, scanner.Text())
+			}
+		}
+	}
+
+	// 检查扫描过程中是否有错误
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+func ExtractHTTPSLinks(input []string) []string {
+	// 定义正则表达式
+	reg := regexp.MustCompile(`https://[^\s]+`)
+
+	// 在字符串中查找匹配的链接
+	var links []string
+	for _, s := range input {
+		links = append(links, reg.FindAllString(s, -1)...)
+	}
+
+	return links
 }
